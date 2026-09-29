@@ -313,6 +313,8 @@ static void sparc32_espdma_device_realize(DeviceState *dev, Error **errp)
     esp->dma_opaque = SPARC32_DMA_DEVICE(dev);
     sysbus->it_shift = 2;
     esp->dma_enabled = 1;
+    /* See esp_raise_irq(): OPENSTEP deadlocks if the IRQ is instant */
+    esp->irq_delay_ns = 500 * 1000;
     sysbus_realize(SYS_BUS_DEVICE(sysbus), &error_fatal);
 }
 

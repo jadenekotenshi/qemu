@@ -43,12 +43,36 @@
  * On Macintosh Quadra it is a NCR53C96.
  */
 
+/*
+ * Real hardware takes a while between a chip command starting and its
+ * interrupt appearing. Guests such as OPENSTEP on sun4m lower their interrupt
+ * level a few instructions before releasing a lock the SCSI interrupt handler
+ * needs, which only works because the interrupt can't possibly arrive that
+ * quickly, and deadlock if it is already pending. Boards can set
+ * irq_delay_ns to delay the interrupt line. The status bit is still set
+ * immediately, so polled drivers are unaffected.
+ */
+static void esp_irq_timer_cb(void *opaque)
+{
+    ESPState *s = opaque;
+
+    if (s->rregs[ESP_RSTAT] & STAT_INT) {
+        qemu_irq_raise(s->irq);
+        trace_esp_raise_irq();
+    }
+}
+
 static void esp_raise_irq(ESPState *s)
 {
     if (!(s->rregs[ESP_RSTAT] & STAT_INT)) {
         s->rregs[ESP_RSTAT] |= STAT_INT;
-        qemu_irq_raise(s->irq);
-        trace_esp_raise_irq();
+        if (s->irq_timer) {
+            timer_mod(s->irq_timer,
+                      qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + s->irq_delay_ns);
+        } else {
+            qemu_irq_raise(s->irq);
+            trace_esp_raise_irq();
+        }
     }
 }
 
@@ -56,6 +80,9 @@ static void esp_lower_irq(ESPState *s)
 {
     if (s->rregs[ESP_RSTAT] & STAT_INT) {
         s->rregs[ESP_RSTAT] &= ~STAT_INT;
+        if (s->irq_timer) {
+            timer_del(s->irq_timer);
+        }
         qemu_irq_lower(s->irq);
         trace_esp_lower_irq();
     }
@@ -1098,6 +1125,9 @@ static void handle_ti(ESPState *s)
 
 void esp_hard_reset(ESPState *s)
 {
+    if (s->irq_timer) {
+        timer_del(s->irq_timer);
+    }
     memset(s->rregs, 0, ESP_REGS);
     memset(s->wregs, 0, ESP_REGS);
     s->tchi_written = 0;
@@ -1114,6 +1144,9 @@ void esp_hard_reset(ESPState *s)
 
 static void esp_soft_reset(ESPState *s)
 {
+    if (s->irq_timer) {
+        timer_del(s->irq_timer);
+    }
     qemu_irq_lower(s->irq);
     qemu_irq_lower(s->drq_irq);
     esp_hard_reset(s);
@@ -1425,6 +1458,12 @@ static int esp_post_load(void *opaque, int version_id)
         s->asc_mode = ESP_ASC_MODE_INI;
     }
 
+    /* A delayed IRQ that was still pending when saving must be raised */
+    if (s->irq_timer && (s->rregs[ESP_RSTAT] & STAT_INT)) {
+        timer_mod(s->irq_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + s->irq_delay_ns);
+    }
+
     s->mig_version_id = vmstate_esp.version_id;
     return 0;
 }
@@ -1597,6 +1636,9 @@ static void sysbus_esp_realize(DeviceState *dev, Error **errp)
     sysbus_init_irq(sbd, &s->irq);
     sysbus_init_irq(sbd, &s->drq_irq);
     assert(sysbus->it_shift != -1);
+    if (s->irq_delay_ns) {
+        s->irq_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, esp_irq_timer_cb, s);
+    }
 
     s->chip_id = TCHI_FAS100A;
     memory_region_init_io(&sysbus->iomem, OBJECT(sysbus), &sysbus_esp_mem_ops,
