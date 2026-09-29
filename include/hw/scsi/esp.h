@@ -30,6 +30,9 @@ struct ESPState {
     uint8_t wregs[ESP_REGS];
     qemu_irq irq;
     qemu_irq drq_irq;
+    QEMUTimer *irq_timer;
+    /* If non-zero, delay raising the IRQ line by this many ns */
+    uint32_t irq_delay_ns;
     bool drq_state;
     uint8_t chip_id;
     bool tchi_written;
