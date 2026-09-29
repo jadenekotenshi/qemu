@@ -1049,6 +1049,10 @@ ssize_t pcnet_receive(NetClientState *nc, const uint8_t *buf, size_t size_)
                     size = 4092;
                 }
                 memcpy(src, buf, size);
+                if (size < ETH_ZLEN) {
+                    memset(src + size, 0, ETH_ZLEN - size);
+                    size = ETH_ZLEN;
+                }
                 /* no need to compute the CRC */
                 src[size] = 0;
                 src[size + 1] = 0;
@@ -1712,6 +1716,14 @@ void pcnet_common_init(DeviceState *dev, PCNetState *s, NetClientInfo *info)
     s->nic = qemu_new_nic(info, &s->conf, object_get_typename(OBJECT(dev)),
                           dev->id, &dev->mem_reentrancy_guard, s);
     qemu_format_nic_info_str(qemu_get_queue(s->nic), s->conf.macaddr.a);
+    /*
+     * Internal loopback goes through qemu_receive_packet(), which would pad
+     * short frames to ETH_ZLEN. A real chip returns exactly what it sent
+     * (plus FCS) and guests such as the SPARCstation boot ROM check the
+     * length, so opt out here. Frames arriving from the network are padded
+     * in pcnet_receive() instead.
+     */
+    qemu_get_queue(s->nic)->do_not_pad = true;
 
     /* Initialize the PROM */
 
