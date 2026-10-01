@@ -4,6 +4,7 @@
 #include "chardev/char-fe.h"
 #include "chardev/char-serial.h"
 #include "hw/core/sysbus.h"
+#include "qemu/timer.h"
 #include "ui/input.h"
 #include "qom/object.h"
 
@@ -49,6 +50,9 @@ typedef struct ESCCChannelState {
     int sunmouse_dx;
     int sunmouse_dy;
     int sunmouse_buttons;
+    QEMUTimer *kbd_timer;
+    uint8_t kbd_resp[4];
+    int kbd_resp_len;
 } ESCCChannelState;
 
 struct ESCCState {

@@ -283,6 +283,10 @@ static void escc_update_irq(ESCCChannelState *s)
 
 static void escc_reset_chn(ESCCChannelState *s)
 {
+    if (s->kbd_timer) {
+        timer_del(s->kbd_timer);
+    }
+    s->kbd_resp_len = 0;
     s->reg = 0;
     s->rx = s->tx = 0;
     s->rxint = s->txint = 0;
@@ -924,6 +928,33 @@ static uint8_t sunkbd_layout_dip_switch(const char *kbd_layout)
     return ret;
 }
 
+/*
+ * A real keyboard answers some milliseconds after the command.  Guests such
+ * as NetBSD only start waiting for the reply once the command has gone out,
+ * so an instant answer is missed and the reset is reported as failed.
+ */
+#define KBD_REPLY_DELAY_NS (10 * SCALE_MS)
+
+static void kbd_reply_cb(void *opaque)
+{
+    ESCCChannelState *s = opaque;
+    int i;
+
+    for (i = 0; i < s->kbd_resp_len; i++) {
+        put_queue(s, s->kbd_resp[i]);
+    }
+    s->kbd_resp_len = 0;
+}
+
+static void kbd_reply(ESCCChannelState *s, const uint8_t *data, int len)
+{
+    clear_queue(s);
+    memcpy(s->kbd_resp, data, len);
+    s->kbd_resp_len = len;
+    timer_mod(s->kbd_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + KBD_REPLY_DELAY_NS);
+}
+
 static void handle_kbd_command(ESCCChannelState *s, int val)
 {
     trace_escc_kbd_command(val);
@@ -933,19 +964,15 @@ static void handle_kbd_command(ESCCChannelState *s, int val)
     }
     switch (val) {
     case 1: /* Reset, return type code */
-        clear_queue(s);
-        put_queue(s, 0xff);
-        put_queue(s, 4); /* Type 4 */
-        put_queue(s, 0x7f);
+        kbd_reply(s, (const uint8_t[]){ 0xff, 4 /* Type 4 */, 0x7f }, 3);
         break;
     case 0xe: /* Set leds */
         s->led_mode = 1;
         break;
     case 7: /* Query layout */
     case 0xf:
-        clear_queue(s);
-        put_queue(s, 0xfe);
-        put_queue(s, sunkbd_layout_dip_switch(s->sunkbd_layout));
+        kbd_reply(s, (const uint8_t[]){
+                      0xfe, sunkbd_layout_dip_switch(s->sunkbd_layout) }, 2);
         break;
     default:
         break;
@@ -1081,6 +1108,8 @@ static void escc_realize(DeviceState *dev, Error **errp)
     if (s->chn[1].type == escc_kbd) {
         s->chn[1].hs = qemu_input_handler_register((DeviceState *)(&s->chn[1]),
                                                    &sunkbd_handler);
+        s->chn[1].kbd_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, kbd_reply_cb,
+                                           &s->chn[1]);
     }
 }
 
