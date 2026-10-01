@@ -29,6 +29,7 @@ struct ESPDMADeviceState {
     DMADeviceState parent_obj;
 
     SysBusESPState esp;
+    uint32_t esp_irq_delay_ns;
 };
 
 #define TYPE_SPARC32_LEDMA_DEVICE "sparc32-ledma"

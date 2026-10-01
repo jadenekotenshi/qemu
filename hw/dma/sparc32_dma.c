@@ -320,10 +320,22 @@ static void sparc32_espdma_device_realize(DeviceState *dev, Error **errp)
     esp->dma_opaque = SPARC32_DMA_DEVICE(dev);
     sysbus->it_shift = 2;
     esp->dma_enabled = 1;
-    /* See esp_raise_irq(): OPENSTEP deadlocks if the IRQ is instant */
-    esp->irq_delay_ns = 500 * 1000;
+    esp->irq_delay_ns = es->esp_irq_delay_ns;
     sysbus_realize(SYS_BUS_DEVICE(sysbus), &error_fatal);
 }
+
+/*
+ * esp-irq-delay-ns: how long after the ESP sets its interrupt status the
+ * interrupt line is raised. Real hardware needs time to select a target and
+ * move data, and the OPENSTEP 4.2 kernel for SPARC relies on that: it lowers
+ * its interrupt level a few instructions before releasing a lock that its
+ * SCSI interrupt handler takes, so an interrupt that is already pending
+ * deadlocks it. Set to 0 for an immediate interrupt.
+ */
+static const Property sparc32_espdma_properties[] = {
+    DEFINE_PROP_UINT32("esp-irq-delay-ns", ESPDMADeviceState,
+                       esp_irq_delay_ns, 500 * 1000),
+};
 
 static void sparc32_espdma_device_class_init(ObjectClass *klass,
                                              const void *data)
@@ -331,6 +343,7 @@ static void sparc32_espdma_device_class_init(ObjectClass *klass,
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = sparc32_espdma_device_realize;
+    device_class_set_props(dc, sparc32_espdma_properties);
 }
 
 static const TypeInfo sparc32_espdma_device_info = {
