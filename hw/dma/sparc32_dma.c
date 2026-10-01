@@ -71,57 +71,64 @@ enum {
 };
 
 /* Note: on sparc, the lance 16 bit bus is swapped */
-void ledma_memory_read(void *opaque, hwaddr addr,
+bool ledma_memory_read(void *opaque, hwaddr addr,
                        uint8_t *buf, int len, int do_bswap)
 {
     DMADeviceState *s = opaque;
     IOMMUState *is = (IOMMUState *)s->iommu;
+    MemTxResult res;
     int i;
 
     addr |= s->dmaregs[3];
     trace_ledma_memory_read(addr, len);
     if (do_bswap) {
-        dma_memory_read(&is->iommu_as, addr, buf, len, MEMTXATTRS_UNSPECIFIED);
+        res = dma_memory_read(&is->iommu_as, addr, buf, len,
+                              MEMTXATTRS_UNSPECIFIED);
     } else {
         addr &= ~1;
         len &= ~1;
-        dma_memory_read(&is->iommu_as, addr, buf, len, MEMTXATTRS_UNSPECIFIED);
-        for(i = 0; i < len; i += 2) {
+        res = dma_memory_read(&is->iommu_as, addr, buf, len,
+                              MEMTXATTRS_UNSPECIFIED);
+        for (i = 0; i < len; i += 2) {
             bswap16s((uint16_t *)(buf + i));
         }
     }
+    return res == MEMTX_OK;
 }
 
-void ledma_memory_write(void *opaque, hwaddr addr,
+bool ledma_memory_write(void *opaque, hwaddr addr,
                         uint8_t *buf, int len, int do_bswap)
 {
     DMADeviceState *s = opaque;
     IOMMUState *is = (IOMMUState *)s->iommu;
+    MemTxResult res = MEMTX_OK;
     int l, i;
     uint16_t tmp_buf[32];
 
     addr |= s->dmaregs[3];
     trace_ledma_memory_write(addr, len);
     if (do_bswap) {
-        dma_memory_write(&is->iommu_as, addr, buf, len,
-                         MEMTXATTRS_UNSPECIFIED);
+        res = dma_memory_write(&is->iommu_as, addr, buf, len,
+                               MEMTXATTRS_UNSPECIFIED);
     } else {
         addr &= ~1;
         len &= ~1;
         while (len > 0) {
             l = len;
-            if (l > sizeof(tmp_buf))
+            if (l > sizeof(tmp_buf)) {
                 l = sizeof(tmp_buf);
-            for(i = 0; i < l; i += 2) {
+            }
+            for (i = 0; i < l; i += 2) {
                 tmp_buf[i >> 1] = bswap16(*(uint16_t *)(buf + i));
             }
-            dma_memory_write(&is->iommu_as, addr, tmp_buf, l,
-                             MEMTXATTRS_UNSPECIFIED);
+            res |= dma_memory_write(&is->iommu_as, addr, tmp_buf, l,
+                                    MEMTXATTRS_UNSPECIFIED);
             len -= l;
             buf += l;
             addr += l;
         }
     }
+    return res == MEMTX_OK;
 }
 
 static void dma_set_irq(void *opaque, int irq, int level)

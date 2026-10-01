@@ -166,16 +166,16 @@ static const MemoryRegionOps pcnet_mmio_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
-static void pci_physical_memory_write(void *dma_opaque, hwaddr addr,
+static bool pci_physical_memory_write(void *dma_opaque, hwaddr addr,
                                       uint8_t *buf, int len, int do_bswap)
 {
-    pci_dma_write(dma_opaque, addr, buf, len);
+    return pci_dma_write(dma_opaque, addr, buf, len) == MEMTX_OK;
 }
 
-static void pci_physical_memory_read(void *dma_opaque, hwaddr addr,
+static bool pci_physical_memory_read(void *dma_opaque, hwaddr addr,
                                      uint8_t *buf, int len, int do_bswap)
 {
-    pci_dma_read(dma_opaque, addr, buf, len);
+    return pci_dma_read(dma_opaque, addr, buf, len) == MEMTX_OK;
 }
 
 static void pci_pcnet_uninit(PCIDevice *dev)
