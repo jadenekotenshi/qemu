@@ -523,6 +523,9 @@ static DeviceState *tcx_init(hwaddr addr, qemu_irq irq, int vram_size,
     /* 9/THC24bits : NetBSD writes here even with 8-bit display: dummy */
     if (depth == 8) {
         sysbus_mmio_map(s, 13, addr + 0x00301000ULL);
+    } else {
+        /* the 8 bit board address, which the FCode still advertises */
+        sysbus_mmio_map(s, 13, addr + 0x00300000ULL);
     }
 
     sysbus_connect_irq(s, 0, irq);
@@ -937,7 +940,8 @@ static void sun4m_hw_init(MachineState *machine)
                 exit(1);
             }
 
-            if (!(graphic_width == 1024 && graphic_height == 768)) {
+            if (!(graphic_width == 1024 && graphic_height == 768) &&
+                !(graphic_width == 1152 && graphic_height == 900)) {
                 error_report("Unsupported resolution: %d x %d",
                              graphic_width, graphic_height);
                 exit(1);

@@ -38,8 +38,6 @@
 #define TCX_ROM_FILE "QEMU,tcx.bin"
 #define FCODE_MAX_ROM_SIZE 0x10000
 
-#define MAXX 1024
-#define MAXY 768
 #define TCX_DAC_NREGS    16
 #define TCX_THC_NREGS    0x1000
 #define TCX_DHC_NREGS    0x4000
@@ -127,6 +125,52 @@ static int tcx_check_dirty(TCXState *s, DirtyBitmapSnapshot *snap,
     return ret;
 }
 
+/*
+ * The FCode falls back to compiled-in defaults (1024x768) for the
+ * openbios-video-* properties that only OpenBIOS provides.  Under any other
+ * firmware, such as the Sun ROM, patch the real geometry into those defaults.
+ */
+static void tcx_patch_fcode_default(uint8_t *rom, int len, uint8_t prop,
+                                    uint32_t val)
+{
+    /* b(lit) prop; ...; then b(lit) <default> follows "6d 13 00 09 b2 10" */
+    const uint8_t pat[] = { 0x08, prop, 0x6d, 0x13, 0x00, 0x09, 0xb2, 0x10 };
+    int i;
+
+    for (i = 0; i + sizeof(pat) + 4 <= len; i++) {
+        if (!memcmp(rom + i, pat, sizeof(pat))) {
+            stl_be_p(rom + i + sizeof(pat), val);
+            return;
+        }
+    }
+}
+
+/* The FCode also maps in the 8 bit plane with a compiled-in 1024x768 size. */
+static void tcx_patch_fcode_fbsize(uint8_t *rom, int len, uint32_t size)
+{
+    const uint8_t pat[] = { 0x08, 0x38, 0xb7, 0x08, 0x1b, 0x10 };
+    int i;
+
+    for (i = 0; i + sizeof(pat) + 4 <= len; i++) {
+        if (!memcmp(rom + i, pat, sizeof(pat))) {
+            stl_be_p(rom + i + sizeof(pat), size);
+            return;
+        }
+    }
+}
+
+/* The FCode header holds a 16 bit sum of everything after the header. */
+static void tcx_fix_fcode_checksum(uint8_t *rom, int len)
+{
+    uint16_t sum = 0;
+    int i;
+
+    for (i = 8; i < len; i++) {
+        sum += rom[i];
+    }
+    stw_be_p(rom + 2, sum);
+}
+
 static void update_palette_entries(TCXState *s, int start, int end)
 {
     int i;
@@ -208,8 +252,8 @@ static inline void tcx24_draw_line32(TCXState *s1, uint8_t *d,
     }
 }
 
-/* Fixed line length 1024 allows us to do nice tricks not possible on
-   VGA... */
+/* The line length equals the display width (1024 or 1152), so a line is
+   always a whole number of pixels in each plane. */
 
 static bool tcx_update_display(void *opaque)
 {
@@ -227,7 +271,7 @@ static bool tcx_update_display(void *opaque)
     d = surface_data(surface);
     s = ts->vram;
     dd = surface_stride(surface);
-    ds = 1024;
+    ds = ts->width;
 
     snap = memory_region_snapshot_and_clear_dirty(&ts->vram_mem, 0x0,
                                              memory_region_size(&ts->vram_mem),
@@ -279,7 +323,7 @@ static bool tcx24_update_display(void *opaque)
     s24 = ts->vram24;
     cptr = ts->cplane;
     dd = surface_stride(surface);
-    ds = 1024;
+    ds = ts->width;
 
     snap = memory_region_snapshot_and_clear_dirty(&ts->vram_mem, 0x0,
                                              memory_region_size(&ts->vram_mem),
@@ -369,8 +413,8 @@ static void tcx_reset(DeviceState *d)
     s->r[256] = s->g[256] = s->b[256] = 255;
     s->r[258] = s->g[258] = s->b[258] = 255;
     update_palette_entries(s, 0, 260);
-    memset(s->vram, 0, MAXX*MAXY);
-    memory_region_reset_dirty(&s->vram_mem, 0, MAXX * MAXY * (1 + 4 + 4),
+    memset(s->vram, 0, s->vram_size);
+    memory_region_reset_dirty(&s->vram_mem, 0, s->vram_size * (1 + 4 + 4),
                               DIRTY_MEMORY_VGA);
     s->dac_index = 0;
     s->dac_state = 0;
@@ -668,8 +712,8 @@ static void tcx_invalidate_cursor_position(TCXState *s)
         return;
     }
     ymax = MIN(s->height, ymin + 32);
-    start = ymin * 1024;
-    end   = ymax * 1024;
+    start = ymin * s->width;
+    end   = ymax * s->width;
 
     tcx_set_dirty(s, start, end - start);
 }
@@ -772,7 +816,7 @@ static void tcx_realize(DeviceState *dev, Error **errp)
     TCXState *s = TCX(dev);
     Object *obj = OBJECT(dev);
     ram_addr_t vram_offset = 0;
-    int size, ret;
+    int size;
     uint8_t *vram_base;
     char *fcode_filename;
 
@@ -833,11 +877,36 @@ static void tcx_realize(DeviceState *dev, Error **errp)
     /* 10/ROM : FCode ROM */
     fcode_filename = qemu_find_file(QEMU_FILE_TYPE_BIOS, TCX_ROM_FILE);
     if (fcode_filename) {
-        ret = load_image_mr(fcode_filename, &s->rom);
-        g_free(fcode_filename);
-        if (ret < 0 || ret > FCODE_MAX_ROM_SIZE) {
+        g_autofree char *fcode = NULL;
+        gsize len;
+
+        if (!g_file_get_contents(fcode_filename, &fcode, &len, NULL) ||
+            len > FCODE_MAX_ROM_SIZE) {
             warn_report("tcx: could not load prom '%s'", TCX_ROM_FILE);
+        } else {
+            uint8_t *rom = (uint8_t *)fcode;
+
+            tcx_patch_fcode_default(rom, len, 0x02, s->width);
+            tcx_patch_fcode_default(rom, len, 0x03, s->height);
+            tcx_patch_fcode_default(rom, len, 0x05, s->width);
+            tcx_patch_fcode_fbsize(rom, len,
+                                   ROUND_UP(s->width * s->height, 0x1000));
+            if (s->depth == 24) {
+                /*
+                 * Guests take the absence of "tcx-8-bit" to mean a 24 bit
+                 * board.  The FCode's own 24 bit branch does not run under
+                 * the Sun ROM, so just rename the property.
+                 */
+                uint8_t *q = memmem(rom, len, "tcx-8-bit", 9);
+
+                if (q) {
+                    q[8] = 'x';
+                }
+            }
+            tcx_fix_fcode_checksum(rom, len);
+            memcpy(memory_region_get_ram_ptr(&s->rom), rom, len);
         }
+        g_free(fcode_filename);
     }
 
     /* 0/DFB8 : 8-bit plane */
@@ -871,6 +940,14 @@ static void tcx_realize(DeviceState *dev, Error **errp)
     if (s->depth == 8) {
         memory_region_init_io(&s->thc24, OBJECT(s), &tcx_dummy_ops, s,
                               "tcx.thc24", TCX_THC_NREGS);
+        sysbus_init_mmio(sbd, &s->thc24);
+    } else {
+        /*
+         * The FCode still advertises an 8 bit board, so guests such as
+         * OPENSTEP look for the THC at its 8 bit board address as well.
+         */
+        memory_region_init_alias(&s->thc24, OBJECT(s), "tcx.thc.alias",
+                                 &s->thc, 0, TCX_THC_NREGS);
         sysbus_init_mmio(sbd, &s->thc24);
     }
 
