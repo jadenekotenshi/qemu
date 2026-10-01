@@ -1061,7 +1061,7 @@ static void sun4m_hw_init(MachineState *machine)
 
     if (hwdef->bpp_base) {
         /* parallel port */
-        create_unimplemented_device("sun-bpp", hwdef->bpp_base, 0x20);
+        sysbus_create_simple("sun-bpp", hwdef->bpp_base, NULL);
     }
 
     initrd_size = 0;
@@ -1159,6 +1159,7 @@ static void ss5_class_init(ObjectClass *oc, const void *data)
         .dma_base     = 0x78400000,
         .esp_base     = 0x78800000,
         .le_base      = 0x78c00000,
+        .bpp_base     = 0x7c800000,
         .apc_base     = 0x6a000000,
         .afx_base     = 0x6e000000,
         .aux1_base    = 0x71900000,

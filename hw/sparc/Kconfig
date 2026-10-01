@@ -9,6 +9,7 @@ config SUN4M
     select EMPTY_SLOT
     select UNIMP
     select ESCC
+    select SUN_BPP
     select ESP
     select FDC_SYSBUS
     select SLAVIO
