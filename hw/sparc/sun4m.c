@@ -51,6 +51,7 @@
 #include "hw/misc/unimp.h"
 #include "hw/core/irq.h"
 #include "hw/core/or-irq.h"
+#include "hw/core/split-irq.h"
 #include "hw/core/loader.h"
 #include "elf.h"
 #include "trace.h"
@@ -475,8 +476,8 @@ static void apc_init(hwaddr power_base, qemu_irq cpu_halt)
     sysbus_connect_irq(s, 0, cpu_halt);
 }
 
-static void tcx_init(hwaddr addr, qemu_irq irq, int vram_size, int width,
-                     int height, int depth)
+static DeviceState *tcx_init(hwaddr addr, qemu_irq irq, int vram_size,
+                             int width, int height, int depth)
 {
     DeviceState *dev;
     SysBusDevice *s;
@@ -525,6 +526,7 @@ static void tcx_init(hwaddr addr, qemu_irq irq, int vram_size, int width,
     }
 
     sysbus_connect_irq(s, 0, irq);
+    return dev;
 }
 
 static void cg3_init(hwaddr addr, qemu_irq irq, int vram_size, int width,
@@ -809,12 +811,14 @@ static void sun4m_hw_init(MachineState *machine)
     unsigned int i;
     Nvram *nvram;
     qemu_irq slavio_irq[32], slavio_cpu_irq[MAX_CPUS];
+    void *iommu;
     qemu_irq fdc_tc;
     unsigned long kernel_size;
     uint32_t initrd_size;
     DriveInfo *fd[MAX_FD];
     FWCfgState *fw_cfg;
-    DeviceState *dev, *ms_kb_orgate, *serial_orgate;
+    DeviceState *dev, *ms_kb_orgate, *serial_orgate, *sbus5_orgate;
+    DeviceState *sbus5_split, *tcxdev = NULL;
     DeviceState *cpus[MAX_CPUS];
     SysBusDevice *s;
     unsigned int smp_cpus = machine->smp.cpus;
@@ -868,7 +872,8 @@ static void sun4m_hw_init(MachineState *machine)
         afx_init(hwdef->afx_base);
     }
 
-    iommu_init(hwdef->iommu_base, hwdef->iommu_version, slavio_irq[30]);
+    iommu = iommu_init(hwdef->iommu_base, hwdef->iommu_version,
+                       slavio_irq[30]);
 
     if (hwdef->iommu_pad_base) {
         /* On the real hardware (SS-5, LX) the MMU is not padded, but aliased.
@@ -882,6 +887,16 @@ static void sun4m_hw_init(MachineState *machine)
     sparc32_dma_init(hwdef->dma_base,
                      hwdef->esp_base, slavio_irq[18],
                      hwdef->le_base, slavio_irq[16], &hostid);
+
+    /* SBus level 5 is shared by the framebuffer and the audio chip */
+    sbus5_orgate = qdev_new(TYPE_OR_IRQ);
+    object_property_set_int(OBJECT(sbus5_orgate), "num-lines", 2, &error_fatal);
+    qdev_realize_and_unref(sbus5_orgate, NULL, &error_fatal);
+    sbus5_split = qdev_new(TYPE_SPLIT_IRQ);
+    object_property_set_int(OBJECT(sbus5_split), "num-lines", 2, &error_fatal);
+    qdev_realize_and_unref(sbus5_split, NULL, &error_fatal);
+    qdev_connect_gpio_out(sbus5_orgate, 0, qdev_get_gpio_in(sbus5_split, 0));
+    qdev_connect_gpio_out(sbus5_split, 0, slavio_irq[11]);
 
     if (!graphic_width) {
         graphic_width = 1024;
@@ -911,8 +926,9 @@ static void sun4m_hw_init(MachineState *machine)
             }
 
             /* sbus irq 5 */
-            cg3_init(hwdef->tcx_base, slavio_irq[11], 0x00100000,
-                     graphic_width, graphic_height, graphic_depth);
+            cg3_init(hwdef->tcx_base, qdev_get_gpio_in(sbus5_orgate, 0),
+                     0x00100000, graphic_width, graphic_height,
+                     graphic_depth);
             vga_interface_created = true;
         } else {
             /* If no display specified, default to TCX */
@@ -927,8 +943,13 @@ static void sun4m_hw_init(MachineState *machine)
                 exit(1);
             }
 
-            tcx_init(hwdef->tcx_base, slavio_irq[11], 0x00100000,
-                     graphic_width, graphic_height, graphic_depth);
+            tcxdev = tcx_init(hwdef->tcx_base,
+                              qdev_get_gpio_in(sbus5_orgate, 0),
+                              0x00100000, graphic_width, graphic_height,
+                              graphic_depth);
+            qdev_connect_gpio_out(sbus5_split, 1,
+                                  qdev_get_gpio_in_named(tcxdev, "sbus-irq",
+                                                         0));
             vga_interface_created = true;
         }
     }
@@ -1018,8 +1039,14 @@ static void sun4m_hw_init(MachineState *machine)
                      slavio_irq[30], fdc_tc);
 
     if (hwdef->cs_base) {
-        sysbus_create_simple("sun-CS4231", hwdef->cs_base,
-                             slavio_irq[5]);
+        DeviceState *cs = qdev_new("sun-CS4231");
+        SysBusDevice *cssbd = SYS_BUS_DEVICE(cs);
+
+        object_property_set_link(OBJECT(cs), "iommu", OBJECT(iommu),
+                                 &error_abort);
+        sysbus_realize_and_unref(cssbd, &error_fatal);
+        sysbus_mmio_map(cssbd, 0, hwdef->cs_base);
+        sysbus_connect_irq(cssbd, 0, qdev_get_gpio_in(sbus5_orgate, 1));
     }
 
     if (hwdef->dbri_base) {

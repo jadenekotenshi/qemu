@@ -5,6 +5,13 @@ cs4231_mem_readl_dreg(uint32_t reg, uint32_t ret) "read dreg %d: 0x%02x"
 cs4231_mem_readl_reg(uint32_t reg, uint32_t ret) "read reg %d: 0x%08x"
 cs4231_mem_writel_reg(uint32_t reg, uint32_t old, uint32_t val) "write reg %d: 0x%08x -> 0x%08x"
 cs4231_mem_writel_dreg(uint32_t reg, uint32_t old, uint32_t val) "write dreg %d: 0x%02x -> 0x%02x"
+cs4231_irq(int level) "irq %d"
+cs4231_play_load(uint32_t addr, uint32_t count) "playback block 0x%08x, %u bytes"
+cs4231_play_empty(void) "playback pipe empty"
+cs4231_play_data(uint32_t guest_len, uint32_t offered, uint32_t first) "offered %u guest bytes, backend took %u, first word 0x%08x"
+cs4231_play_open(int freq, int channels, uint32_t fmt) "open playback: %d Hz, %d channel(s), format register 0x%02x"
+cs4231_cap_load(uint32_t addr, uint32_t count) "capture block 0x%08x, %u bytes"
+cs4231_cap_open(int freq, int channels, uint32_t fmt) "open capture: %d Hz, %d channel(s), format register 0x%02x"
 
 # es1370.c
 es1370_frame_address_rd(int ch, uint32_t addr) "ch=%d addr=0x%08x"
