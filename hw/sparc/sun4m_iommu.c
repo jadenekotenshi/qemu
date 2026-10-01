@@ -280,7 +280,14 @@ static void iommu_bad_addr(IOMMUState *s, hwaddr addr,
         s->regs[IOMMU_AFSR] |= IOMMU_AFSR_RD;
     }
     s->regs[IOMMU_AFAR] = addr;
-    qemu_irq_raise(s->irq);
+    /*
+     * A failed read is reported to the bus master (which gets an error
+     * acknowledge) and needs no help from the CPU; only a failed write,
+     * which the master has already completed, is reported asynchronously.
+     */
+    if (is_write) {
+        qemu_irq_raise(s->irq);
+    }
 }
 
 /* Called from RCU critical section */
