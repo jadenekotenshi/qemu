@@ -51,6 +51,7 @@
 #define TCX_RBLIT_NREGS  0x800000
 
 #define TCX_THC_MISC     0x818
+#define TCX_THC_MISC_INTR 0x10
 #define TCX_THC_CURSXY   0x8fc
 #define TCX_THC_CURSMASK 0x900
 #define TCX_THC_CURSBITS 0x980
@@ -90,6 +91,7 @@ struct TCXState {
     uint16_t width, height, depth;
     uint8_t dac_index, dac_state;
     uint32_t thcmisc;
+    bool sbus_irq;          /* state of the shared SBus interrupt line */
     uint32_t cursmask[32];
     uint32_t cursbits[32];
     uint16_t cursx;
@@ -672,6 +674,13 @@ static void tcx_invalidate_cursor_position(TCXState *s)
     tcx_set_dirty(s, start, end - start);
 }
 
+static void tcx_sbus_irq_set(void *opaque, int n, int level)
+{
+    TCXState *s = opaque;
+
+    s->sbus_irq = level;
+}
+
 static uint64_t tcx_thc_readl(void *opaque, hwaddr addr,
                             unsigned size)
 {
@@ -679,7 +688,15 @@ static uint64_t tcx_thc_readl(void *opaque, hwaddr addr,
     uint64_t val;
 
     if (addr == TCX_THC_MISC) {
+        /*
+         * The interrupt pending bit follows the SBus interrupt line, which
+         * the TCX shares with other devices; guests read it to find out
+         * whether to look further when the line is asserted.
+         */
         val = s->thcmisc | 0x02000000;
+        if (s->sbus_irq) {
+            val |= TCX_THC_MISC_INTR;
+        }
     } else {
         val = 0;
     }
@@ -858,6 +875,7 @@ static void tcx_realize(DeviceState *dev, Error **errp)
     }
 
     sysbus_init_irq(sbd, &s->irq);
+    qdev_init_gpio_in_named(dev, tcx_sbus_irq_set, "sbus-irq", 1);
 
     if (s->depth == 8) {
         s->con = qemu_graphic_console_create(dev, 0, &tcx_ops, s);
