@@ -122,7 +122,10 @@ DECLARE_INSTANCE_CHECKER(CSState, CS4231,
 #define CS_I_MODE       12  /* Mode and ID */
 #define CS_I_ALT_STATUS 24
 #define CS_I_VERSION    25
+#define CS_I_ALT_FEATURE2 17
 #define CS_I_CAP_FORMAT 28
+
+#define CS_ALT2_APAR    0x04 /* ADPCM playback accumulator reset */
 
 #define CS_IAR_MCE      0x40
 #define CS_IAR_TRD      0x20
@@ -137,6 +140,11 @@ DECLARE_INSTANCE_CHECKER(CSState, CS4231,
 
 /* Delay between the APC raising an interrupt and the CPU seeing it */
 #define CS_IRQ_DELAY_NS (100 * 1000)
+
+typedef struct CSAdpcmState {
+    int32_t predictor;
+    int32_t index;
+} CSAdpcmState;
 
 struct CSState {
     SysBusDevice parent_obj;
@@ -161,6 +169,12 @@ struct CSState {
     SWVoiceIn *voice_in;
     uint32_t out_cfg;       /* format register the output voice uses */
     uint32_t in_cfg;
+
+    /* ADPCM codec state, one per channel */
+    CSAdpcmState play_adpcm[2];
+    CSAdpcmState cap_adpcm[2];
+    bool play_was_enabled;
+    bool cap_was_enabled;
 };
 
 #define CS_RAP(s) ((s)->regs[CS_REG_IAR] & CS_MAXDREG)
@@ -193,6 +207,7 @@ static bool cs_fmt_supported(uint8_t reg)
     case CS_FMT_ULAW:
     case CS_FMT_S16LE:
     case CS_FMT_ALAW:
+    case CS_FMT_ADPCM:
     case CS_FMT_S16BE:
         return cs_freq_table[reg & 0x0f] != 0;
     default:
@@ -205,6 +220,15 @@ static bool cs_fmt_stereo(uint8_t reg)
     return reg & 0x10;
 }
 
+static bool cs_fmt_adpcm(uint8_t reg)
+{
+    return cs_fmt_code(reg) == CS_FMT_ADPCM;
+}
+
+/*
+ * Granularity of the guest data in bytes. ADPCM carries two 4 bit samples
+ * per byte (two mono frames, or one stereo frame), so a byte is the unit.
+ */
 static int cs_fmt_bytes_per_frame(uint8_t reg)
 {
     int ch = cs_fmt_stereo(reg) ? 2 : 1;
@@ -223,6 +247,38 @@ static bool cs_fmt_companded(uint8_t reg)
     int f = cs_fmt_code(reg);
 
     return f == CS_FMT_ULAW || f == CS_FMT_ALAW;
+}
+
+/* Bytes of 16 bit host audio produced from one byte of guest data */
+static int cs_fmt_expansion(uint8_t reg)
+{
+    if (cs_fmt_adpcm(reg)) {
+        return 4;
+    }
+    return cs_fmt_companded(reg) ? 2 : 1;
+}
+
+/* Guest bytes in "frames" sample frames */
+static uint32_t cs_fmt_bytes_for_frames(uint8_t reg, uint32_t frames)
+{
+    if (cs_fmt_adpcm(reg)) {
+        return cs_fmt_stereo(reg) ? frames : (frames + 1) / 2;
+    }
+    return frames * cs_fmt_bytes_per_frame(reg);
+}
+
+static uint8_t cs_fmt_silence(uint8_t reg)
+{
+    switch (cs_fmt_code(reg)) {
+    case CS_FMT_U8:
+        return 0x80;
+    case CS_FMT_ULAW:
+        return 0xff;
+    case CS_FMT_ALAW:
+        return 0xd5;
+    default:
+        return 0;
+    }
 }
 
 static int16_t cs_ulaw_to_s16(uint8_t u)
@@ -254,6 +310,112 @@ static int16_t cs_alaw_to_s16(uint8_t a)
         t <<= seg - 1;
     }
     return (a & 0x80) ? t : -t;
+}
+
+/* ---- IMA ADPCM and companding helpers ---- */
+
+static const int8_t cs_ima_index_table[16] = {
+    -1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8,
+};
+
+static const int16_t cs_ima_step_table[89] = {
+    7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41,
+    45, 50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 130, 143, 157, 173, 190,
+    209, 230, 253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658, 724,
+    796, 876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272,
+    2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132,
+    7845, 8630, 9493, 10442, 11487, 12635, 13899, 15289, 16818, 18500,
+    20350, 22385, 24623, 27086, 29794, 32767,
+};
+
+static int16_t cs_ima_decode(CSAdpcmState *st, uint8_t nib)
+{
+    int step = cs_ima_step_table[st->index];
+    int diff = step >> 3;
+
+    if (nib & 4) {
+        diff += step;
+    }
+    if (nib & 2) {
+        diff += step >> 1;
+    }
+    if (nib & 1) {
+        diff += step >> 2;
+    }
+    st->predictor += (nib & 8) ? -diff : diff;
+    st->predictor = MAX(-32768, MIN(32767, st->predictor));
+    st->index = MAX(0, MIN(88, st->index + cs_ima_index_table[nib]));
+    return st->predictor;
+}
+
+static uint8_t cs_ima_encode(CSAdpcmState *st, int16_t sample)
+{
+    int step = cs_ima_step_table[st->index];
+    int diff = sample - st->predictor;
+    uint8_t nib = 0;
+
+    if (diff < 0) {
+        nib = 8;
+        diff = -diff;
+    }
+    if (diff >= step) {
+        nib |= 4;
+        diff -= step;
+    }
+    if (diff >= step >> 1) {
+        nib |= 2;
+        diff -= step >> 1;
+    }
+    if (diff >= step >> 2) {
+        nib |= 1;
+    }
+    /* Track the decoder so both sides stay in step */
+    cs_ima_decode(st, nib);
+    return nib;
+}
+
+static uint8_t cs_s16_to_ulaw(int16_t pcm)
+{
+    int mask, seg, magnitude;
+    uint8_t out;
+
+    if (pcm < 0) {
+        magnitude = MIN(-pcm, 32635);
+        mask = 0x7f;
+    } else {
+        magnitude = MIN(pcm, 32635);
+        mask = 0xff;
+    }
+    magnitude += 0x84;
+    for (seg = 7; seg > 0 && !(magnitude & (0x80 << seg)); seg--) {
+        /* find the segment */
+    }
+    out = (seg << 4) | ((magnitude >> (seg + 3)) & 0x0f);
+    return out ^ mask;
+}
+
+static uint8_t cs_s16_to_alaw(int16_t pcm)
+{
+    int mask, seg, magnitude;
+    uint8_t out;
+
+    if (pcm >= 0) {
+        magnitude = pcm;
+        mask = 0xd5;
+    } else {
+        magnitude = -pcm - 1;
+        mask = 0x55;
+    }
+    magnitude = MIN(magnitude, 32767) >> 3;
+    for (seg = 0; seg < 7 && magnitude >= (0x20 << seg); seg++) {
+        /* find the segment */
+    }
+    if (seg == 0) {
+        out = (magnitude >> 1) & 0x0f;
+    } else {
+        out = (seg << 4) | ((magnitude >> seg) & 0x0f);
+    }
+    return out ^ mask;
 }
 
 /* Work out the interrupt line level from the status and enable bits */
@@ -379,12 +541,45 @@ static void cs_set_out_volume(CSState *s)
     }
 }
 
+/* Backend sample format for a guest format register */
+static void cs_fmt_to_settings(uint8_t fmt, struct audsettings *as)
+{
+    int code = cs_fmt_code(fmt);
+
+    as->freq = cs_freq_table[fmt & 0x0f];
+    as->nchannels = cs_fmt_stereo(fmt) ? 2 : 1;
+    if (code == CS_FMT_U8) {
+        as->fmt = AUDIO_FORMAT_U8;
+        as->big_endian = false;
+    } else if (code == CS_FMT_S16BE) {
+        as->fmt = AUDIO_FORMAT_S16;
+        as->big_endian = true;
+    } else if (code == CS_FMT_S16LE) {
+        as->fmt = AUDIO_FORMAT_S16;
+        as->big_endian = false;
+    } else {
+        /* companded and ADPCM data is expanded to native 16 bit samples */
+        as->fmt = AUDIO_FORMAT_S16;
+        as->big_endian = HOST_BIG_ENDIAN;
+    }
+}
+
+static void cs_play_adpcm_reset(CSState *s)
+{
+    memset(s->play_adpcm, 0, sizeof(s->play_adpcm));
+}
+
 static void cs_play_sync(CSState *s)
 {
     uint8_t fmt = s->dregs[CS_I_FORMAT];
-    int code = cs_fmt_code(fmt);
+    bool enabled = cs_play_enabled(s);
 
-    if (!cs_play_enabled(s) || !cs_fmt_supported(fmt)) {
+    if (enabled && !s->play_was_enabled) {
+        cs_play_adpcm_reset(s);
+    }
+    s->play_was_enabled = enabled;
+
+    if (!enabled || !cs_fmt_supported(fmt)) {
         if (s->voice_out) {
             audio_be_set_active_out(s->audio_be, s->voice_out, false);
         }
@@ -398,22 +593,8 @@ static void cs_play_sync(CSState *s)
         struct audsettings as;
 
         cs_close_out(s);
-        as.freq = cs_freq_table[fmt & 0x0f];
-        as.nchannels = cs_fmt_stereo(fmt) ? 2 : 1;
-        if (code == CS_FMT_U8) {
-            as.fmt = AUDIO_FORMAT_U8;
-            as.big_endian = false;
-        } else if (code == CS_FMT_S16BE) {
-            as.fmt = AUDIO_FORMAT_S16;
-            as.big_endian = true;
-        } else if (code == CS_FMT_S16LE) {
-            as.fmt = AUDIO_FORMAT_S16;
-            as.big_endian = false;
-        } else {
-            /* companded data is expanded to native 16 bit samples */
-            as.fmt = AUDIO_FORMAT_S16;
-            as.big_endian = HOST_BIG_ENDIAN;
-        }
+        cs_fmt_to_settings(fmt, &as);
+        cs_play_adpcm_reset(s);
         trace_cs4231_play_open(as.freq, as.nchannels, fmt);
         s->voice_out = audio_be_open_out(s->audio_be, NULL, "cs4231.out", s,
                                          cs_out_callback, &as);
@@ -428,20 +609,41 @@ static void cs_play_sync(CSState *s)
     }
 }
 
+/*
+ * Expand n bytes of ADPCM from the guest into 16 bit samples. Each byte
+ * holds two samples: the low nibble comes first, and in stereo it is the
+ * left channel with the right channel in the high nibble.
+ */
+static void cs_adpcm_decode(CSState *s, const uint8_t *in, uint32_t n,
+                            int16_t *out)
+{
+    bool stereo = cs_fmt_stereo(s->dregs[CS_I_FORMAT]);
+    uint32_t i;
+
+    for (i = 0; i < n; i++) {
+        uint8_t lo = in[i] & 0x0f, hi = in[i] >> 4;
+
+        *out++ = cs_ima_decode(&s->play_adpcm[0], lo);
+        *out++ = cs_ima_decode(&s->play_adpcm[stereo ? 1 : 0], hi);
+    }
+}
+
 static void cs_out_callback(void *opaque, int avail)
 {
     CSState *s = opaque;
     uint8_t fmt = s->dregs[CS_I_FORMAT];
     bool companded = cs_fmt_companded(fmt);
-    int mult = companded ? 2 : 1;
+    bool adpcm = cs_fmt_adpcm(fmt);
+    int mult = cs_fmt_expansion(fmt);
     int bpf = cs_fmt_bytes_per_frame(fmt);
     uint8_t buf[4096];
-    int16_t conv[4096];
+    int16_t conv[8192];
 
     while (avail > 0 && cs_play_enabled(s)) {
         uint32_t n;
         size_t written;
         int guest_avail = avail / mult;
+        CSAdpcmState saved[2];
 
         cs_play_load_next(s);
         if (!s->regs[APC_PC]) {
@@ -464,7 +666,12 @@ static void cs_out_callback(void *opaque, int avail)
             return;
         }
 
-        if (companded) {
+        memcpy(saved, s->play_adpcm, sizeof(saved));
+        if (adpcm) {
+            cs_adpcm_decode(s, buf, n, conv);
+            written = audio_be_write(s->audio_be, s->voice_out, conv, n * 4);
+            written /= 4;
+        } else if (companded) {
             uint32_t i;
             bool ulaw = cs_fmt_code(fmt) == CS_FMT_ULAW;
 
@@ -478,8 +685,13 @@ static void cs_out_callback(void *opaque, int avail)
             written = audio_be_write(s->audio_be, s->voice_out, buf, n);
         }
 
-        trace_cs4231_play_data(n, written, ldl_be_p(buf));
         written -= written % bpf;
+        trace_cs4231_play_data(n, written, ldl_be_p(buf));
+        if (adpcm && written < n) {
+            /* The decoder ran ahead of what the backend took: rewind it */
+            memcpy(s->play_adpcm, saved, sizeof(saved));
+            cs_adpcm_decode(s, buf, written, conv);
+        }
         if (!written) {
             return;
         }
@@ -516,6 +728,14 @@ static void cs_cap_load_next(CSState *s)
     cs_update_irq(s);
 }
 
+/* The capture format register, with the sample rate it shares with playback */
+static uint8_t cs_cap_format(CSState *s)
+{
+    uint8_t rate = s->dregs[CS_I_FORMAT] & 0x0f;
+
+    return (s->dregs[CS_I_CAP_FORMAT] & 0xf0) | rate;
+}
+
 /* A paused (or stopped) capture engine with nothing in flight is "empty" */
 static void cs_cap_paused_check(CSState *s)
 {
@@ -526,17 +746,22 @@ static void cs_cap_paused_check(CSState *s)
     }
 }
 
+static void cs_cap_adpcm_reset(CSState *s)
+{
+    memset(s->cap_adpcm, 0, sizeof(s->cap_adpcm));
+}
+
 static void cs_cap_sync(CSState *s)
 {
-    uint8_t fmt = s->dregs[CS_I_CAP_FORMAT];
-    uint8_t rate = s->dregs[CS_I_FORMAT];
-    int code = cs_fmt_code(fmt);
+    uint8_t fmt = cs_cap_format(s);
+    bool enabled = cs_cap_enabled(s);
 
-    /* Capture shares the sample rate with playback */
-    fmt = (fmt & 0xf0) | (rate & 0x0f);
+    if (enabled && !s->cap_was_enabled) {
+        cs_cap_adpcm_reset(s);
+    }
+    s->cap_was_enabled = enabled;
 
-    if (!cs_cap_enabled(s) || !cs_fmt_supported(fmt) ||
-        cs_fmt_companded(fmt)) {
+    if (!enabled || !cs_fmt_supported(fmt)) {
         if (s->voice_in) {
             audio_be_set_active_in(s->audio_be, s->voice_in, false);
         }
@@ -549,15 +774,8 @@ static void cs_cap_sync(CSState *s)
         struct audsettings as;
 
         cs_close_in(s);
-        as.freq = cs_freq_table[fmt & 0x0f];
-        as.nchannels = cs_fmt_stereo(fmt) ? 2 : 1;
-        if (code == CS_FMT_U8) {
-            as.fmt = AUDIO_FORMAT_U8;
-            as.big_endian = false;
-        } else {
-            as.fmt = AUDIO_FORMAT_S16;
-            as.big_endian = code == CS_FMT_S16BE;
-        }
+        cs_fmt_to_settings(fmt, &as);
+        cs_cap_adpcm_reset(s);
         trace_cs4231_cap_open(as.freq, as.nchannels, fmt);
         s->voice_in = audio_be_open_in(s->audio_be, NULL, "cs4231.in", s,
                                        cs_in_callback, &as);
@@ -573,10 +791,10 @@ static void cs_cap_sync(CSState *s)
     }
 }
 
-/* Deliver captured frames (or silence) to the guest's capture buffers */
+/* Deliver captured guest-format data (or silence) to the capture buffers */
 static void cs_cap_push(CSState *s, uint8_t *buf, uint32_t len, bool silence)
 {
-    uint8_t fmt = s->dregs[CS_I_CAP_FORMAT];
+    uint8_t fmt = cs_cap_format(s);
     int bpf = cs_fmt_bytes_per_frame(fmt);
 
     while (len >= bpf && cs_cap_enabled(s)) {
@@ -599,7 +817,7 @@ static void cs_cap_push(CSState *s, uint8_t *buf, uint32_t len, bool silence)
         }
 
         if (silence) {
-            memset(buf, cs_fmt_code(fmt) == CS_FMT_U8 ? 0x80 : 0, n);
+            memset(buf, cs_fmt_silence(fmt), n);
         }
         if (dma_memory_write(cs_dma_as(s), s->regs[APC_CVA], buf, n,
                              MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
@@ -615,28 +833,71 @@ static void cs_cap_push(CSState *s, uint8_t *buf, uint32_t len, bool silence)
     }
 }
 
+/*
+ * Convert n frames' worth of host 16 bit samples to the guest capture
+ * format. Used for the formats that are not passed through unchanged.
+ */
+static uint32_t cs_cap_encode(CSState *s, const int16_t *in, uint32_t nbytes,
+                              uint8_t *out)
+{
+    uint8_t fmt = cs_cap_format(s);
+    uint32_t i;
+
+    if (cs_fmt_adpcm(fmt)) {
+        bool stereo = cs_fmt_stereo(fmt);
+
+        for (i = 0; i < nbytes; i++) {
+            uint8_t lo = cs_ima_encode(&s->cap_adpcm[0], in[2 * i]);
+            uint8_t hi = cs_ima_encode(&s->cap_adpcm[stereo ? 1 : 0],
+                                       in[2 * i + 1]);
+
+            out[i] = lo | (hi << 4);
+        }
+    } else {
+        bool ulaw = cs_fmt_code(fmt) == CS_FMT_ULAW;
+
+        for (i = 0; i < nbytes; i++) {
+            out[i] = ulaw ? cs_s16_to_ulaw(in[i]) : cs_s16_to_alaw(in[i]);
+        }
+    }
+    return nbytes;
+}
+
 static void cs_in_callback(void *opaque, int avail)
 {
     CSState *s = opaque;
-    uint8_t fmt = s->dregs[CS_I_CAP_FORMAT];
+    uint8_t fmt = cs_cap_format(s);
+    bool convert = cs_fmt_companded(fmt) || cs_fmt_adpcm(fmt);
+    int mult = cs_fmt_expansion(fmt);
     int bpf = cs_fmt_bytes_per_frame(fmt);
     uint8_t buf[4096];
+    int16_t conv[8192];
 
     while (avail > 0 && cs_cap_enabled(s)) {
-        uint32_t n = MIN((uint32_t)avail, sizeof(buf));
+        uint32_t n = MIN((uint32_t)avail / mult, sizeof(buf));
         size_t got;
 
         n -= n % bpf;
         if (!n) {
             return;
         }
-        got = audio_be_read(s->audio_be, s->voice_in, buf, n);
-        got -= got % bpf;
-        if (!got) {
-            return;
+        if (convert) {
+            got = audio_be_read(s->audio_be, s->voice_in, conv, n * mult);
+            got /= mult;
+            got -= got % bpf;
+            if (!got) {
+                return;
+            }
+            cs_cap_encode(s, conv, got, buf);
+        } else {
+            got = audio_be_read(s->audio_be, s->voice_in, buf, n);
+            got -= got % bpf;
+            if (!got) {
+                return;
+            }
         }
         cs_cap_push(s, buf, got, false);
-        avail -= got;
+        avail -= got * mult;
     }
 }
 
@@ -644,16 +905,15 @@ static void cs_in_callback(void *opaque, int avail)
 static void cs_cap_timer_cb(void *opaque)
 {
     CSState *s = opaque;
-    uint8_t fmt = s->dregs[CS_I_CAP_FORMAT];
-    int rate = cs_freq_table[s->dregs[CS_I_FORMAT] & 0x0f];
-    int bpf = cs_fmt_bytes_per_frame(fmt);
+    uint8_t fmt = cs_cap_format(s);
     uint8_t buf[4096];
     uint32_t n;
 
     if (!cs_cap_enabled(s) || s->voice_in) {
         return;
     }
-    n = MIN((uint32_t)(rate / 100) * bpf, sizeof(buf));
+    n = MIN(cs_fmt_bytes_for_frames(fmt, cs_freq_table[fmt & 0x0f] / 100),
+            sizeof(buf));
     cs_cap_push(s, buf, n, true);
     timer_mod(s->cap_timer,
               qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 10 * SCALE_MS);
@@ -745,6 +1005,11 @@ static void cs_dreg_write(CSState *s, uint32_t idx, uint8_t val)
         break;
     case CS_I_CAP_FORMAT:
         cs_cap_sync(s);
+        break;
+    case CS_I_ALT_FEATURE2:
+        if ((s->dregs[idx] & CS_ALT2_APAR) && !(old & CS_ALT2_APAR)) {
+            cs_play_adpcm_reset(s);
+        }
         break;
     case 6:
     case 7:
@@ -884,15 +1149,28 @@ static int cs_post_load(void *opaque, int version_id)
 
     cs_close_out(s);
     cs_close_in(s);
+    s->play_was_enabled = cs_play_enabled(s);
+    s->cap_was_enabled = cs_cap_enabled(s);
     cs_play_sync(s);
     cs_cap_sync(s);
     cs_update_irq(s);
     return 0;
 }
 
+static const VMStateDescription vmstate_cs_adpcm = {
+    .name = "cs4231/adpcm",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_INT32(predictor, CSAdpcmState),
+        VMSTATE_INT32(index, CSAdpcmState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription vmstate_cs4231 = {
     .name = "cs4231",
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .post_load = cs_post_load,
     .fields = (const VMStateField[]) {
@@ -900,6 +1178,10 @@ static const VMStateDescription vmstate_cs4231 = {
         VMSTATE_UINT8_ARRAY(dregs, CSState, CS_DREGS),
         VMSTATE_BOOL_V(play_next_valid, CSState, 2),
         VMSTATE_BOOL_V(cap_next_valid, CSState, 2),
+        VMSTATE_STRUCT_ARRAY(play_adpcm, CSState, 2, 3, vmstate_cs_adpcm,
+                               CSAdpcmState),
+        VMSTATE_STRUCT_ARRAY(cap_adpcm, CSState, 2, 3, vmstate_cs_adpcm,
+                               CSAdpcmState),
         VMSTATE_END_OF_LIST()
     }
 };
