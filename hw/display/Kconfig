@@ -86,6 +86,9 @@ config TCX
 config CG3
     bool
 
+config CG14
+    bool
+
 config ARTIST
     bool
     select FRAMEBUFFER

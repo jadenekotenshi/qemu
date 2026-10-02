@@ -227,3 +227,11 @@ apple_gfx_iosfc_unmap_memory(void *a, void *b, void *c, void *d, void *e, void *
 apple_gfx_iosfc_unmap_memory_region(void* mem, void *region) "unmapping @ %p from memory region %p"
 apple_gfx_iosfc_raise_irq(uint32_t vector) "vector=0x%x"
 
+
+# cg14.c
+cg14_reg_read(uint64_t addr, unsigned size, uint64_t val) "read 0x%04"PRIx64" size %u = 0x%"PRIx64
+cg14_reg_write(uint64_t addr, unsigned size, uint64_t val) "write 0x%04"PRIx64" size %u = 0x%"PRIx64
+
+# sun-sx.c
+sun_sx_read(uint64_t addr, unsigned size, uint32_t val) "read 0x%04"PRIx64" size %u = 0x%08x"
+sun_sx_write(uint64_t addr, unsigned size, uint64_t val) "write 0x%04"PRIx64" size %u = 0x%"PRIx64

@@ -2559,7 +2559,7 @@ SRST
 ERST
 
 DEF("vga", HAS_ARG, QEMU_OPTION_vga,
-    "-vga [std|cirrus|vmware|qxl|xenfb|tcx|cg3|virtio|none]\n"
+    "-vga [std|cirrus|vmware|qxl|xenfb|tcx|cg3|cg14|virtio|none]\n"
     "                select video card type\n", QEMU_ARCH_ALL)
 SRST
 ``-vga type``
@@ -2599,6 +2599,14 @@ SRST
         framebuffer for sun4m machines available in both 1024x768
         (OpenBIOS) and 1152x900 (OBP) resolutions aimed at people
         wishing to run older Solaris versions.
+
+    ``cg14``
+        (SS-10/20 only) Sun cgfourteen framebuffer on a VSIMM, with a
+        register-level SX accelerator. 1152x900 by default.
+
+    ``cg14``
+        (SPARCstation 10/20 only) Sun cgfourteen framebuffer with its SX
+        accelerator, at 1152x900 by default.
 
     ``virtio``
         Virtio VGA card.

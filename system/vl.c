@@ -991,6 +991,11 @@ static const VGAInterfaceInfo vga_interfaces[VGA_TYPE_MAX] = {
         .name = "CG3 framebuffer",
         .class_names = { "cgthree" },
     },
+    [VGA_CG14] = {
+        .opt_name = "cg14",
+        .name = "CG14 framebuffer",
+        .class_names = { "sun-cg14" },
+    },
 #ifdef CONFIG_XEN_BACKEND
     [VGA_XENFB] = {
         .opt_name = "xenfb",
