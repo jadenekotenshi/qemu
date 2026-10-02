@@ -825,6 +825,36 @@ static void dummy_fdc_tc(void *opaque, int irq, int level)
 {
 }
 
+/*
+ * A tiny FCode image that only names the DBRI node. Without it the Sun
+ * boot PROM creates a node without a "name" property, which the OPENSTEP
+ * kernel dereferences (strcmp on NULL) while autoconfiguring SBus.
+ */
+static void sun4m_dbri_prom_init(hwaddr addr)
+{
+    static const uint8_t fcode[] = {
+        0xf1, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x12, 0x09, 'S', 'U', 'N', 'W', ',', 'D', 'B', 'R', 'I',
+        0x02, 0x01, 0x00
+    };
+    MemoryRegion *prom = g_new(MemoryRegion, 1);
+    uint8_t *p;
+    uint16_t sum = 0;
+    int i;
+
+    memory_region_init_rom(prom, NULL, "sun-DBRI.prom", 0x1000, &error_fatal);
+    p = memory_region_get_ram_ptr(prom);
+    memset(p, 0, 0x1000);
+    memcpy(p, fcode, sizeof(fcode));
+    for (i = 8; i < sizeof(fcode); i++) {
+        sum += p[i];
+    }
+    p[2] = sum >> 8;
+    p[3] = sum;
+    stl_be_p(p + 4, sizeof(fcode));
+    memory_region_add_subregion(get_system_memory(), addr, prom);
+}
+
 static void sun4m_hw_init(MachineState *machine)
 {
     const struct sun4m_hwdef *hwdef = SUN4M_MACHINE_GET_CLASS(machine)->hwdef;
@@ -1129,8 +1159,7 @@ static void sun4m_hw_init(MachineState *machine)
     if (hwdef->dbri_base) {
         /* ISDN chip with attached CS4215 audio codec */
         /* prom space */
-        create_unimplemented_device("sun-DBRI.prom",
-                                    hwdef->dbri_base + 0x1000, 0x30);
+        sun4m_dbri_prom_init(hwdef->dbri_base + 0x1000);
         /* reg space */
         create_unimplemented_device("sun-DBRI",
                                     hwdef->dbri_base + 0x10000, 0x100);
