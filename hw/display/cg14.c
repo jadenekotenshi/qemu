@@ -30,6 +30,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(CG14State, SUN_CG14)
 #define CG14_REG_SIZE      0x10000
 
 #define CG14_MCTL          0x00
+#define CG14_PPR           0x01
 #define  CG14_MCTL_VID     0x40
 #define  CG14_MCTL_PIXMODE(x) (((x) >> 4) & 3)
 #define CG14_RSR           0x06
@@ -282,7 +283,7 @@ static bool cg14_update_display(void *opaque)
     unsigned mode = CG14_MCTL_PIXMODE(s->regs[CG14_MCTL]);
     bool video = s->regs[CG14_MCTL] & CG14_MCTL_VID;
     DirtyBitmapSnapshot *snap;
-    int bpp = mode == 3 ? 4 : mode == 2 ? 2 : 1;
+    int bpp;
     int y, y0 = -1;
 
     /*
@@ -291,6 +292,16 @@ static bool cg14_update_display(void *opaque)
      * firmware leaves test patterns in it.
      */
     s->use_gamma = mode == 2;
+    /*
+     * OPENSTEP keeps the pixel mode at 8 bits but selects CLUT2/3 in the
+     * packed pixel register and draws 24 bit XBGR pixels (with the CLUTs
+     * unprogrammed the pixel passes straight through). Console text leaves
+     * PPR on CLUT1 and uses indexed bytes.
+     */
+    if (mode == 0 && (s->regs[CG14_PPR] & 0xc0) >= 0x80) {
+        mode = 3;
+    }
+    bpp = mode == 3 ? 4 : mode == 2 ? 2 : 1;
     cg14_update_geometry(s);
     surface = qemu_console_surface(s->con);
     d = surface_data(surface);
