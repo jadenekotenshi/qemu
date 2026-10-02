@@ -96,7 +96,7 @@ struct sun4m_hwdef {
     hwaddr serial_base, fd_base;
     hwaddr afx_base, idreg_base, dma_base, esp_base, le_base;
     hwaddr tcx_base, cs_base, apc_base, aux1_base, aux2_base;
-    hwaddr bpp_base, dbri_base, sx_base;
+    hwaddr bpp_base, dbri_base, sx_base, mctl_base;
     struct {
         hwaddr reg_base, vram_base;
     } vsimm[MAX_VSIMMS];
@@ -990,6 +990,19 @@ static void sun4m_hw_init(MachineState *machine)
         create_unimplemented_device("sun-sx", hwdef->sx_base, 0x2000);
     }
 
+    if (hwdef->mctl_base) {
+        /*
+         * The Sun ROM reads and writes a few registers here while probing
+         * memory.  Their meaning is unknown; a plain register file lets it
+         * carry on.
+         */
+        MemoryRegion *mctl = g_new(MemoryRegion, 1);
+
+        memory_region_init_ram(mctl, NULL, "sun4m.mctl", 0x1000, &error_fatal);
+        memory_region_add_subregion(get_system_memory(), hwdef->mctl_base,
+                                    mctl);
+    }
+
     dev = qdev_new("sysbus-m48t08");
     qdev_prop_set_int32(dev, "base-year", 1968);
     nvram_dinfo = drive_get(IF_MTD, 0, 0);
@@ -1296,6 +1309,7 @@ static void ss20_class_init(ObjectClass *oc, const void *data)
         .aux2_base    = 0xff1a01000ULL,
         .dbri_base    = 0xee0000000ULL,
         .sx_base      = 0xf80000000ULL,
+        .mctl_base    = 0xff8c00000ULL,
         .vsimm        = {
             {
                 .reg_base  = 0x9c000000ULL,
