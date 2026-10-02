@@ -1309,8 +1309,13 @@ static int mode_sense_page(SCSIDiskState *s, int page, uint8_t **p_outbuf,
         }
 
     case MODE_PAGE_VENDOR_SPECIFIC:
-        if (s->qdev.type == TYPE_DISK && (s->quirks &
-            (1 << SCSI_DISK_QUIRK_MODE_PAGE_VENDOR_SPECIFIC_APPLE))) {
+        /*
+         * Real disks implement a (vendor specific) page 0, and some
+         * initiators, such as OPENSTEP, ask for it and log a fatal error
+         * when it is refused.  Return an empty one for every disk; the
+         * Apple quirk is kept for the sake of its property.
+         */
+        if (s->qdev.type == TYPE_DISK) {
             length = 0x2;
             if (page_control == 1) { /* Changeable Values */
                 p[0] = 0xff;
