@@ -38,7 +38,10 @@ OBJECT_DECLARE_SIMPLE_TYPE(CG14State, SUN_CG14)
 #define CG14_VBS           0x22  /* vertical blank start */
 #define CG14_VBC           0x24  /* vertical blank clear */
 
+#define CG14_DAC_ADDR      0x2000
+#define CG14_DAC_GAMMA     0x2100
 #define CG14_CLUT1         0x4000
+#define CG14_CLUT2         0x5000
 #define CG14_CLUT_SIZE     0x1000
 
 #define CG14_FB_8BIT       0x00000000
@@ -55,11 +58,14 @@ struct CG14State {
     QemuConsole *con;
 
     uint8_t regs[CG14_REG_SIZE];
+    uint8_t gamma[768];
+    uint32_t gamma_idx;   /* next gamma LUT component to be written */
 
     uint32_t vram_size;
     uint16_t width, height;
     uint8_t monitor_id;
     bool redraw;
+    bool use_gamma;
 };
 
 static void cg14_dirty_all(CG14State *s)
@@ -93,6 +99,13 @@ static void cg14_regs_write(void *opaque, hwaddr addr, uint64_t val,
 
         if (a == CG14_RSR) {
             continue; /* read only */
+        }
+        if (a == CG14_DAC_ADDR) {
+            s->gamma_idx = b * 3;
+        } else if (a == CG14_DAC_GAMMA) {
+            /* three writes (R, G, B) per entry, then the address moves on */
+            s->gamma[s->gamma_idx % 768] = b;
+            s->gamma_idx = (s->gamma_idx + 1) % 768;
         }
         s->regs[a] = b;
     }
@@ -130,12 +143,23 @@ static const MemoryRegionOps cg14_regs_ops = {
     },
 };
 
+static inline uint32_t cg14_out(CG14State *s, unsigned r, unsigned g,
+                                unsigned b)
+{
+    if (!s->use_gamma) {
+        return rgb_to_pixel32(MIN(r, 255), MIN(g, 255), MIN(b, 255));
+    }
+    return rgb_to_pixel32(s->gamma[3 * MIN(r, 255)],
+                          s->gamma[3 * MIN(g, 255) + 1],
+                          s->gamma[3 * MIN(b, 255) + 2]);
+}
+
 static inline uint32_t cg14_clut_color(CG14State *s, unsigned clut, uint8_t i)
 {
     const uint8_t *p = &s->regs[CG14_CLUT1 + clut * CG14_CLUT_SIZE + i * 4];
 
     /* stored as a big endian word 0x00BBGGRR */
-    return rgb_to_pixel32(p[3], p[2], p[1]);
+    return cg14_out(s, p[3], p[2], p[1]);
 }
 
 static void cg14_draw_8(CG14State *s, uint8_t *d, const uint8_t *v)
@@ -148,6 +172,27 @@ static void cg14_draw_8(CG14State *s, uint8_t *d, const uint8_t *v)
     }
 }
 
+/*
+ * 16 bit pixels are two bytes, each looked up in its own CLUT (the first
+ * in CLUT1, the second in CLUT2) and the results added up; that is how
+ * the drivers build an R5G6B5 display out of the palette hardware.
+ */
+static void cg14_draw_16(CG14State *s, uint8_t *d, const uint8_t *v)
+{
+    uint32_t *p = (uint32_t *)d;
+    const uint8_t *c1 = &s->regs[CG14_CLUT1];
+    const uint8_t *c2 = &s->regs[CG14_CLUT2];
+    int x;
+
+    for (x = 0; x < s->width; x++) {
+        const uint8_t *a = &c1[v[2 * x] * 4];
+        const uint8_t *b = &c2[v[2 * x + 1] * 4];
+
+        /* each entry is a big endian word 0x00BBGGRR */
+        p[x] = cg14_out(s, a[3] + b[3], a[2] + b[2], a[1] + b[1]);
+    }
+}
+
 static void cg14_draw_32(CG14State *s, uint8_t *d, const uint8_t *v)
 {
     uint32_t *p = (uint32_t *)d;
@@ -155,7 +200,7 @@ static void cg14_draw_32(CG14State *s, uint8_t *d, const uint8_t *v)
 
     for (x = 0; x < s->width; x++) {
         /* X B G R */
-        p[x] = rgb_to_pixel32(v[4 * x + 3], v[4 * x + 2], v[4 * x + 1]);
+        p[x] = cg14_out(s, v[4 * x + 3], v[4 * x + 2], v[4 * x + 1]);
     }
 }
 
@@ -187,9 +232,15 @@ static bool cg14_update_display(void *opaque)
     unsigned mode = CG14_MCTL_PIXMODE(s->regs[CG14_MCTL]);
     bool video = s->regs[CG14_MCTL] & CG14_MCTL_VID;
     DirtyBitmapSnapshot *snap;
-    int bpp = mode == 3 ? 4 : 1;
+    int bpp = mode == 3 ? 4 : mode == 2 ? 2 : 1;
     int y, y0 = -1;
 
+    /*
+     * The gamma table is only meaningful for 16 bit pixels, where the
+     * drivers use it to undo the half intensity of the summed CLUTs; the
+     * firmware leaves test patterns in it.
+     */
+    s->use_gamma = mode == 2;
     cg14_update_geometry(s);
     surface = qemu_console_surface(s->con);
     d = surface_data(surface);
@@ -210,6 +261,8 @@ static bool cg14_update_display(void *opaque)
                 memset(d + y * stride, 0, s->width * 4);
             } else if (mode == 3) {
                 cg14_draw_32(s, d + y * stride, v + off);
+            } else if (mode == 2) {
+                cg14_draw_16(s, d + y * stride, v + off);
             } else {
                 cg14_draw_8(s, d + y * stride, v + off);
             }
@@ -246,7 +299,13 @@ static void cg14_reset(DeviceState *dev)
 {
     CG14State *s = SUN_CG14(dev);
 
+    int i;
+
     memset(s->regs, 0, sizeof(s->regs));
+    for (i = 0; i < 256; i++) {
+        s->gamma[3 * i] = s->gamma[3 * i + 1] = s->gamma[3 * i + 2] = i;
+    }
+    s->gamma_idx = 0;
     s->regs[CG14_RSR] = 0x10; /* revision 1, three CLUTs */
     s->regs[0x0c] = s->monitor_id; /* monitor data register */
     cg14_dirty_all(s);
@@ -286,6 +345,8 @@ static const VMStateDescription vmstate_cg14 = {
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_BUFFER(regs, CG14State),
+        VMSTATE_BUFFER(gamma, CG14State),
+        VMSTATE_UINT32(gamma_idx, CG14State),
         VMSTATE_END_OF_LIST()
     }
 };

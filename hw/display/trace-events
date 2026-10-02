@@ -235,3 +235,5 @@ cg14_reg_write(uint64_t addr, unsigned size, uint64_t val) "write 0x%04"PRIx64" 
 # sun-sx.c
 sun_sx_read(uint64_t addr, unsigned size, uint32_t val) "read 0x%04"PRIx64" size %u = 0x%08x"
 sun_sx_write(uint64_t addr, unsigned size, uint64_t val) "write 0x%04"PRIx64" size %u = 0x%"PRIx64
+sun_sx_mem(uint64_t addr, uint32_t insn, unsigned count) "memory insn at 0x%"PRIx64" 0x%08x count %u"
+sun_sx_alu(uint32_t insn) "alu insn 0x%08x"
