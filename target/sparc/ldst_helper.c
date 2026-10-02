@@ -580,6 +580,23 @@ static uint64_t leon3_cache_control_ld(CPUSPARCState *env, target_ulong addr,
     return ret;
 }
 
+/*
+ * A stream operation that gets no answer from the bus does not trap; the
+ * MXCC records it in its error register (ME, ASE and EIV, plus the high
+ * physical address bits), which is how firmware finds out that a memory
+ * bank is not there.
+ */
+static void mxcc_stream_error(CPUSPARCState *env, hwaddr addr)
+{
+    uint64_t err = env->mxccregs[6];
+
+    if (err & (1ULL << 25)) {
+        err |= 1ULL << 31; /* multiple errors */
+    }
+    err |= (1ULL << 26) | (1ULL << 25) | ((addr >> 32) & 0xf);
+    env->mxccregs[6] = err;
+}
+
 uint64_t helper_ld_asi(CPUSPARCState *env, target_ulong addr,
                        int asi, uint32_t memop)
 {
@@ -883,9 +900,7 @@ void helper_st_asi(CPUSPARCState *env, target_ulong addr, uint64_t val,
                                                         MEMTXATTRS_UNSPECIFIED,
                                                         &result);
                 if (result != MEMTX_OK) {
-                    /* TODO: investigate whether this is the right behaviour */
-                    sparc_raise_mmu_fault(cs, access_addr, false, false,
-                                          false, size, GETPC());
+                    mxcc_stream_error(env, access_addr);
                 }
             }
             break;
@@ -910,9 +925,7 @@ void helper_st_asi(CPUSPARCState *env, target_ulong addr, uint64_t val,
                                      MEMTXATTRS_UNSPECIFIED, &result);
 
                 if (result != MEMTX_OK) {
-                    /* TODO: investigate whether this is the right behaviour */
-                    sparc_raise_mmu_fault(cs, access_addr, true, false,
-                                          false, size, GETPC());
+                    mxcc_stream_error(env, access_addr);
                 }
             }
             break;
