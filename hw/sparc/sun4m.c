@@ -921,10 +921,10 @@ static void sun4m_hw_init(MachineState *machine)
     qdev_connect_gpio_out(sbus5_split, 0, slavio_irq[11]);
 
     if (!graphic_width) {
-        graphic_width = vga_interface_type == VGA_CG14 ? 1152 : 1024;
+        graphic_width = vga_interface_type == VGA_CG14 ? 0 : 1024;
     }
     if (!graphic_height) {
-        graphic_height = vga_interface_type == VGA_CG14 ? 900 : 768;
+        graphic_height = vga_interface_type == VGA_CG14 ? 0 : 768;
     }
     if (!graphic_depth) {
         graphic_depth = 8;
@@ -945,14 +945,17 @@ static void sun4m_hw_init(MachineState *machine)
             qdev_prop_set_uint16(cg14, "width", graphic_width);
             qdev_prop_set_uint16(cg14, "height", graphic_height);
             sysbus_realize_and_unref(SYS_BUS_DEVICE(cg14), &error_fatal);
+            /* the device picked the size if none was given */
+            graphic_width = object_property_get_uint(OBJECT(cg14), "width",
+                                                     &error_abort);
+            graphic_height = object_property_get_uint(OBJECT(cg14), "height",
+                                                      &error_abort);
             sysbus_mmio_map(SYS_BUS_DEVICE(cg14), 0,
                             hwdef->vsimm[0].reg_base);
             sysbus_mmio_map(SYS_BUS_DEVICE(cg14), 1,
                             hwdef->vsimm[0].vram_base);
             sysbus_mmio_map(SYS_BUS_DEVICE(cg14), 2,
                             hwdef->vsimm[0].vram_base + 0x01000000ULL);
-            sysbus_mmio_map(SYS_BUS_DEVICE(cg14), 3,
-                            hwdef->vsimm[0].vram_base + 8 * MiB);
             if (hwdef->sx_base) {
                 DeviceState *sx = qdev_new("sun-sx");
 

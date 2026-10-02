@@ -40,6 +40,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(CG14State, SUN_CG14)
 
 #define CG14_DAC_ADDR      0x2000
 #define CG14_DAC_GAMMA     0x2100
+#define CG14_VCA           0x20c /* VBC configuration */
+#define  CG14_VCA_8MB      0x2000
 #define CG14_CLUT1         0x4000
 #define CG14_CLUT2         0x5000
 #define CG14_CLUT_SIZE     0x1000
@@ -52,9 +54,8 @@ struct CG14State {
 
     MemoryRegion regs_mr;
     MemoryRegion vram_mem;
-    MemoryRegion vram_8bit;
     MemoryRegion vram_cbgr;
-    MemoryRegion vram_pad;
+    MemoryRegion vram_win;     /* 16 MB window, the RAM repeated in it */
     QemuConsole *con;
 
     uint8_t regs[CG14_REG_SIZE];
@@ -63,7 +64,7 @@ struct CG14State {
 
     uint32_t vram_size;
     uint16_t width, height;
-    uint8_t monitor_id;
+    uint8_t msr;
     bool redraw;
     bool use_gamma;
 };
@@ -97,7 +98,7 @@ static void cg14_regs_write(void *opaque, hwaddr addr, uint64_t val,
         uint8_t b = val >> (8 * (size - 1 - i));
         hwaddr a = (addr + i) & (CG14_REG_SIZE - 1);
 
-        if (a == CG14_RSR) {
+        if (a == CG14_RSR || (a >= CG14_VCA && a < CG14_VCA + 4)) {
             continue; /* read only */
         }
         if (a == CG14_DAC_ADDR) {
@@ -111,27 +112,6 @@ static void cg14_regs_write(void *opaque, hwaddr addr, uint64_t val,
     }
     cg14_dirty_all(s);
 }
-
-/*
- * The firmware sizes the video RAM by writing just past the end of it and
- * expects that to be harmless, so the rest of the aperture swallows writes
- * and reads as zero.
- */
-static uint64_t cg14_pad_read(void *opaque, hwaddr addr, unsigned size)
-{
-    return 0;
-}
-
-static void cg14_pad_write(void *opaque, hwaddr addr, uint64_t val,
-                           unsigned size)
-{
-}
-
-static const MemoryRegionOps cg14_pad_ops = {
-    .read = cg14_pad_read,
-    .write = cg14_pad_write,
-    .endianness = DEVICE_BIG_ENDIAN,
-};
 
 static const MemoryRegionOps cg14_regs_ops = {
     .read = cg14_regs_read,
@@ -307,14 +287,52 @@ static void cg14_reset(DeviceState *dev)
     }
     s->gamma_idx = 0;
     s->regs[CG14_RSR] = 0x10; /* revision 1, three CLUTs */
-    s->regs[0x0c] = s->monitor_id; /* monitor data register */
+    s->regs[0x04] = s->msr; /* master status */
+    s->regs[0x0c] = 0x04;     /* monitor data register */
+    stl_be_p(&s->regs[CG14_VCA], s->vram_size >= 8 * MiB ? CG14_VCA_8MB : 0);
     cg14_dirty_all(s);
 }
+
+/*
+ * The ROM picks the video mode from the monitor sense lines in the master
+ * status register (MSR bits 3:1).  A 4 MB board drives a 1152x900 monitor
+ * and an 8 MB one a 1280x1024 monitor, unless asked for something else.
+ */
+static const struct {
+    uint16_t width, height;
+    uint8_t sense;
+} cg14_modes[] = {
+    { 1024, 768, 0 },
+    { 1600, 1280, 2 },
+    { 1280, 1024, 4 },
+    { 1152, 900, 6 },
+};
 
 static void cg14_realize(DeviceState *dev, Error **errp)
 {
     CG14State *s = SUN_CG14(dev);
     SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
+    int i;
+
+    if (!s->width || !s->height) {
+        s->width = s->vram_size >= 8 * MiB ? 1280 : 1152;
+        s->height = s->vram_size >= 8 * MiB ? 1024 : 900;
+    }
+    if (s->msr == 0xff) {
+        for (i = 0; i < ARRAY_SIZE(cg14_modes); i++) {
+            if (cg14_modes[i].width == s->width &&
+                cg14_modes[i].height == s->height) {
+                s->msr = cg14_modes[i].sense;
+                break;
+            }
+        }
+        if (i == ARRAY_SIZE(cg14_modes)) {
+            error_setg(errp, "sun-cg14: unsupported resolution %ux%u "
+                       "(try 1024x768, 1152x900, 1280x1024 or 1600x1280)",
+                       s->width, s->height);
+            return;
+        }
+    }
 
     memory_region_init_io(&s->regs_mr, OBJECT(s), &cg14_regs_ops, s,
                           "cg14.regs", CG14_REG_SIZE);
@@ -324,16 +342,23 @@ static void cg14_realize(DeviceState *dev, Error **errp)
                            s->vram_size, &error_fatal);
     memory_region_set_log(&s->vram_mem, true, DIRTY_MEMORY_VGA);
 
-    memory_region_init_alias(&s->vram_8bit, OBJECT(s), "cg14.vram.8bit",
-                             &s->vram_mem, 0, s->vram_size);
-    sysbus_init_mmio(sbd, &s->vram_8bit);
-    memory_region_init_alias(&s->vram_cbgr, OBJECT(s), "cg14.vram.cbgr",
-                             &s->vram_mem, 0, s->vram_size);
-    sysbus_init_mmio(sbd, &s->vram_cbgr);
+    /*
+     * The video RAM answers in a 16 MB window and wraps around at its own
+     * size, which is how the firmware tells a 4 MB board from an 8 MB one.
+     */
+    memory_region_init(&s->vram_win, OBJECT(s), "cg14.vram.window", 16 * MiB);
+    for (hwaddr off = 0; off < 16 * MiB; off += s->vram_size) {
+        MemoryRegion *alias = g_new(MemoryRegion, 1);
 
-    memory_region_init_io(&s->vram_pad, OBJECT(s), &cg14_pad_ops, s,
-                          "cg14.vram.pad", 16 * MiB - s->vram_size);
-    sysbus_init_mmio(sbd, &s->vram_pad);
+        memory_region_init_alias(alias, OBJECT(s), "cg14.vram.copy",
+                                 &s->vram_mem, 0, s->vram_size);
+        memory_region_add_subregion(&s->vram_win, off, alias);
+    }
+    sysbus_init_mmio(sbd, &s->vram_win);
+
+    memory_region_init_alias(&s->vram_cbgr, OBJECT(s), "cg14.vram.cbgr",
+                             &s->vram_win, 0, 16 * MiB);
+    sysbus_init_mmio(sbd, &s->vram_cbgr);
 
     s->con = qemu_graphic_console_create(dev, 0, &cg14_ops, s);
     qemu_console_resize(s->con, s->width, s->height);
@@ -353,9 +378,9 @@ static const VMStateDescription vmstate_cg14 = {
 
 static const Property cg14_properties[] = {
     DEFINE_PROP_UINT32("vram-size", CG14State, vram_size, 8 * MiB),
-    DEFINE_PROP_UINT16("width", CG14State, width, 1152),
-    DEFINE_PROP_UINT16("height", CG14State, height, 900),
-    DEFINE_PROP_UINT8("monitor-id", CG14State, monitor_id, 4),
+    DEFINE_PROP_UINT16("width", CG14State, width, 0),
+    DEFINE_PROP_UINT16("height", CG14State, height, 0),
+    DEFINE_PROP_UINT8("msr", CG14State, msr, 0xff),
 };
 
 static void cg14_class_init(ObjectClass *klass, const void *data)

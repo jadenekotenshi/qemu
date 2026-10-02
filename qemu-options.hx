@@ -2602,7 +2602,10 @@ SRST
 
     ``cg14``
         (SS-10/20 only) Sun cgfourteen framebuffer on a VSIMM, with a
-        register-level SX accelerator. 1152x900 by default.
+        register-level SX accelerator. The resolution follows the size
+        of the video RAM, as it does on real boards: 1280x1024 with the
+        default 8 MB and 1152x900 with ``-global sun-cg14.vram-size=4194304``.
+        ``-g`` can select 1024x768, 1152x900, 1280x1024 or 1600x1280.
 
     ``cg14``
         (SPARCstation 10/20 only) Sun cgfourteen framebuffer with its SX
