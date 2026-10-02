@@ -38,6 +38,8 @@ typedef struct M48txxInfo {
     uint32_t size;
 } M48txxInfo;
 
+#include "system/block-backend.h"
+
 typedef struct M48t59State {
     /* Hardware parameters */
     qemu_irq IRQ;
@@ -53,6 +55,7 @@ typedef struct M48t59State {
     QEMUTimer *wd_timer;
     /* NVRAM storage */
     uint8_t *buffer;
+    BlockBackend *blk; /* optional backing file for the NVRAM area */
     /* Model parameters */
     uint32_t model; /* 2 = m48t02, 8 = m48t08, 59 = m48t59 */
     /* NVRAM storage */

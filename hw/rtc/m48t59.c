@@ -26,6 +26,7 @@
 #include "qemu/osdep.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 #include "hw/rtc/m48t59.h"
 #include "qemu/timer.h"
 #include "system/runstate.h"
@@ -34,6 +35,7 @@
 #include "hw/core/sysbus.h"
 #include "qapi/error.h"
 #include "qemu/bcd.h"
+#include "qemu/error-report.h"
 #include "qemu/module.h"
 #include "trace.h"
 #include "system/watchdog.h"
@@ -346,6 +348,13 @@ void m48t59_write(M48t59State *NVRAM, uint32_t addr, uint32_t val)
     do_write:
         if (addr < NVRAM->size) {
             NVRAM->buffer[addr] = val & 0xFF;
+            /* the last 8 bytes are the clock registers, not storage */
+            if (NVRAM->blk && addr < NVRAM->size - 8) {
+                if (blk_pwrite(NVRAM->blk, addr, 1, &NVRAM->buffer[addr],
+                               0) < 0) {
+                    error_report("m48t59: failed to write NVRAM backing file");
+                }
+            }
         }
         break;
     }
@@ -566,6 +575,28 @@ const MemoryRegionOps m48t59_io_ops = {
 void m48t59_realize_common(M48t59State *s, Error **errp)
 {
     s->buffer = g_malloc0(s->size);
+    if (s->blk) {
+        int64_t len = blk_getlength(s->blk);
+
+        if (blk_set_perm(s->blk, BLK_PERM_CONSISTENT_READ | BLK_PERM_WRITE |
+                         BLK_PERM_RESIZE, BLK_PERM_ALL, errp) < 0) {
+            return;
+        }
+        if (len == 0 &&
+            blk_truncate(s->blk, s->size, false, PREALLOC_MODE_OFF, 0,
+                         errp) < 0) {
+            return;
+        }
+        if (len != 0 && len != s->size) {
+            error_setg(errp, "NVRAM backing file must be %u bytes (is %"
+                       PRId64 ")", s->size, len);
+            return;
+        }
+        if (blk_pread(s->blk, 0, s->size, s->buffer, 0) < 0) {
+            error_setg(errp, "failed to read the NVRAM backing file");
+            return;
+        }
+    }
     if (s->model == 59) {
         s->alrm_timer = timer_new_ns(rtc_clock, &alarm_cb, s);
         s->wd_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, &watchdog_cb, s);
@@ -620,6 +651,7 @@ static void m48txx_sysbus_toggle_lock(Nvram *obj, int lock)
 
 static const Property m48t59_sysbus_properties[] = {
     DEFINE_PROP_INT32("base-year", M48txxSysBusState, state.base_year, 0),
+    DEFINE_PROP_DRIVE("drive", M48txxSysBusState, state.blk),
 };
 
 static void m48txx_sysbus_class_init(ObjectClass *klass, const void *data)

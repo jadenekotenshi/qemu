@@ -148,7 +148,8 @@ static void nvram_init(Nvram *nvram, uint8_t *macaddr,
                        const char *cmdline, const char *boot_devices,
                        ram_addr_t RAM_size, uint32_t kernel_size,
                        int width, int height, int depth,
-                       int nvram_machine_id, const char *arch)
+                       int nvram_machine_id, const char *arch,
+                       bool persistent)
 {
     unsigned int i;
     int sysp_end;
@@ -156,6 +157,23 @@ static void nvram_init(Nvram *nvram, uint8_t *macaddr,
     NvramClass *k = NVRAM_GET_CLASS(nvram);
 
     memset(image, '\0', sizeof(image));
+
+    /*
+     * A persistent NVRAM that already holds settings is left alone, apart
+     * from the ID PROM, which has to match this machine.
+     */
+    if (persistent) {
+        for (i = 0; i < 0x1fd0 && !k->read(nvram, i); i++) {
+        }
+        if (i < 0x1fd0) {
+            Sun_init_header((struct Sun_nvram *)&image[0x1fd8], macaddr,
+                            nvram_machine_id);
+            for (i = 0x1fd8; i < sizeof(image); i++) {
+                (k->write)(nvram, i, image[i]);
+            }
+            return;
+        }
+    }
 
     /* OpenBIOS nvram variables partition */
     sysp_end = chrp_nvram_create_system_partition(image, 0, 0x1fd0);
@@ -813,6 +831,7 @@ static void sun4m_hw_init(MachineState *machine)
     DeviceState *slavio_intctl;
     unsigned int i;
     Nvram *nvram;
+    DriveInfo *nvram_dinfo;
     qemu_irq slavio_irq[32], slavio_cpu_irq[MAX_CPUS];
     void *iommu;
     qemu_irq fdc_tc;
@@ -973,6 +992,11 @@ static void sun4m_hw_init(MachineState *machine)
 
     dev = qdev_new("sysbus-m48t08");
     qdev_prop_set_int32(dev, "base-year", 1968);
+    nvram_dinfo = drive_get(IF_MTD, 0, 0);
+    if (nvram_dinfo) {
+        qdev_prop_set_drive_err(dev, "drive",
+                                blk_by_legacy_dinfo(nvram_dinfo), &error_fatal);
+    }
     s = SYS_BUS_DEVICE(dev);
     sysbus_realize_and_unref(s, &error_fatal);
     sysbus_connect_irq(s, 0, slavio_irq[0]);
@@ -1076,7 +1100,7 @@ static void sun4m_hw_init(MachineState *machine)
     nvram_init(nvram, hostid.a, machine->kernel_cmdline,
                machine->boot_config.order, machine->ram_size, kernel_size,
                graphic_width, graphic_height, graphic_depth,
-               hwdef->nvram_machine_id, "Sun4m");
+               hwdef->nvram_machine_id, "Sun4m", nvram_dinfo != NULL);
 
     if (hwdef->ecc_base)
         ecc_init(hwdef->ecc_base, slavio_irq[28],
