@@ -588,7 +588,17 @@ static void escc_mem_write(void *opaque, hwaddr addr,
                 s->rregs[R_STATUS] |= STATUS_SYNC;
             }
             break;
-        case W_INTR ... W_IVEC:
+        case W_INTR:
+            s->wregs[s->reg] = val;
+            /*
+             * Disabling the transmit interrupt drops a pending one; OpenBSD's
+             * zs driver relies on that instead of resetting it explicitly.
+             */
+            if (!(val & INTR_TXINT) && s->txint) {
+                clr_txint(s);
+            }
+            break;
+        case W_IVEC:
         case W_SYNC1 ... W_TXBUF:
         case W_MISC1 ... W_CLOCK:
         case W_MISC2 ... W_EXTINT:
