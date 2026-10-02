@@ -56,6 +56,8 @@ struct CG14State {
     MemoryRegion vram_mem;
     MemoryRegion vram_cbgr;
     MemoryRegion vram_win;     /* 16 MB window, the RAM repeated in it */
+    MemoryRegion planar;       /* X, B, G, R channels as separate planes */
+    MemoryRegion planar16;     /* 16 bit planar views (accepted, unused) */
     QemuConsole *con;
 
     uint8_t regs[CG14_REG_SIZE];
@@ -113,11 +115,79 @@ static void cg14_regs_write(void *opaque, hwaddr addr, uint64_t val,
     cg14_dirty_all(s);
 }
 
+/*
+ * The 32 bit planar apertures: four 4 MB windows, one per channel of the
+ * chunky XBGR pixels (X, B, G, R in that order), each one byte per pixel.
+ */
+static uint64_t cg14_planar_read(void *opaque, hwaddr addr, unsigned size)
+{
+    CG14State *s = opaque;
+    const uint8_t *v = memory_region_get_ram_ptr(&s->vram_mem);
+    unsigned ch = (addr >> 22) & 3;
+    uint64_t val = 0;
+    unsigned i;
+
+    for (i = 0; i < size; i++) {
+        hwaddr n = (addr & 0x3fffff) + i;
+
+        val = (val << 8) | v[(4 * n + ch) % s->vram_size];
+    }
+    return val;
+}
+
+static void cg14_planar_write(void *opaque, hwaddr addr, uint64_t val,
+                              unsigned size)
+{
+    CG14State *s = opaque;
+    uint8_t *v = memory_region_get_ram_ptr(&s->vram_mem);
+    unsigned ch = (addr >> 22) & 3;
+    unsigned i;
+
+    for (i = 0; i < size; i++) {
+        hwaddr n = (addr & 0x3fffff) + i;
+        hwaddr off = (4 * n + ch) % s->vram_size;
+
+        v[off] = val >> (8 * (size - 1 - i));
+        memory_region_set_dirty(&s->vram_mem, off, 1);
+    }
+}
+
+static const MemoryRegionOps cg14_planar_ops = {
+    .read = cg14_planar_read,
+    .write = cg14_planar_write,
+    .endianness = DEVICE_BIG_ENDIAN,
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 8,
+    },
+};
+
+/* the 16 bit planar views are not modelled: reads give zero */
+static uint64_t cg14_null_read(void *opaque, hwaddr addr, unsigned size)
+{
+    return 0;
+}
+
+static void cg14_null_write(void *opaque, hwaddr addr, uint64_t val,
+                            unsigned size)
+{
+}
+
+static const MemoryRegionOps cg14_null_ops = {
+    .read = cg14_null_read,
+    .write = cg14_null_write,
+    .endianness = DEVICE_BIG_ENDIAN,
+};
+
 static const MemoryRegionOps cg14_regs_ops = {
     .read = cg14_regs_read,
     .write = cg14_regs_write,
     .endianness = DEVICE_BIG_ENDIAN,
     .valid = {
+        .min_access_size = 1,
+        .max_access_size = 8,
+    },
+    .impl = {
         .min_access_size = 1,
         .max_access_size = 4,
     },
@@ -355,6 +425,13 @@ static void cg14_realize(DeviceState *dev, Error **errp)
         memory_region_add_subregion(&s->vram_win, off, alias);
     }
     sysbus_init_mmio(sbd, &s->vram_win);
+
+    memory_region_init_io(&s->planar, OBJECT(s), &cg14_planar_ops, s,
+                          "cg14.planar", 16 * MiB);
+    sysbus_init_mmio(sbd, &s->planar);
+    memory_region_init_io(&s->planar16, OBJECT(s), &cg14_null_ops, s,
+                          "cg14.planar16", 16 * MiB);
+    sysbus_init_mmio(sbd, &s->planar16);
 
     memory_region_init_alias(&s->vram_cbgr, OBJECT(s), "cg14.vram.cbgr",
                              &s->vram_win, 0, 16 * MiB);

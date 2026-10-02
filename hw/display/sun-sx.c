@@ -343,6 +343,9 @@ static uint64_t sx_read(void *opaque, hwaddr addr, unsigned size)
     SunSXState *s = opaque;
     uint32_t val;
 
+    /* the unprivileged register window at +0x1000 mirrors the first page */
+    addr &= 0xfff;
+
     if (addr >= SX_DIRECT_R0 && addr < SX_DIRECT_R0 + SX_NREGS * 4) {
         val = s->r[(addr - SX_DIRECT_R0) >> 2];
     } else if (addr >= SX_QUEUED_R0 && addr < SX_QUEUED_R0 + SX_NREGS * 4) {
@@ -368,6 +371,8 @@ static void sx_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
 {
     SunSXState *s = opaque;
 
+    addr &= 0xfff;
+
     trace_sun_sx_write(addr, size, val);
     if (addr >= SX_DIRECT_R0 && addr < SX_DIRECT_R0 + SX_NREGS * 4) {
         sx_setreg(s, (addr - SX_DIRECT_R0) >> 2, val);
@@ -387,6 +392,10 @@ static const MemoryRegionOps sx_ops = {
     .write = sx_write,
     .endianness = DEVICE_BIG_ENDIAN,
     .valid = {
+        .min_access_size = 4,
+        .max_access_size = 8,
+    },
+    .impl = {
         .min_access_size = 4,
         .max_access_size = 4,
     },

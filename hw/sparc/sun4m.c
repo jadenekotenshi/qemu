@@ -955,6 +955,10 @@ static void sun4m_hw_init(MachineState *machine)
             sysbus_mmio_map(SYS_BUS_DEVICE(cg14), 1,
                             hwdef->vsimm[0].vram_base);
             sysbus_mmio_map(SYS_BUS_DEVICE(cg14), 2,
+                            hwdef->vsimm[0].vram_base + 0x03000000ULL);
+            sysbus_mmio_map(SYS_BUS_DEVICE(cg14), 3,
+                            hwdef->vsimm[0].vram_base + 0x02000000ULL);
+            sysbus_mmio_map(SYS_BUS_DEVICE(cg14), 4,
                             hwdef->vsimm[0].vram_base + 0x01000000ULL);
             if (hwdef->sx_base) {
                 DeviceState *sx = qdev_new("sun-sx");
