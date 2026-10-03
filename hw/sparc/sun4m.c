@@ -895,6 +895,56 @@ static void sun4m_dbri_prom_init(hwaddr addr, hwaddr reg_off, int irq_level)
     memory_region_add_subregion(get_system_memory(), addr, prom);
 }
 
+typedef struct Sun4mMctl {
+    MemoryRegion io;
+    CPUSPARCState *env;
+    uint8_t ram[0x1000];
+} Sun4mMctl;
+
+static bool sun4m_mctl_is_mxcc(hwaddr off)
+{
+    return off >= 0xa00 && off < 0x1000;
+}
+
+static uint64_t sun4m_mctl_read(void *opaque, hwaddr off, unsigned size)
+{
+    Sun4mMctl *m = opaque;
+    uint64_t v = 0;
+    unsigned i;
+
+    if (sun4m_mctl_is_mxcc(off)) {
+        return cpu_sparc_mxcc_read(m->env, off, size);
+    }
+    for (i = 0; i < size; i++) {
+        v = (v << 8) | m->ram[off + i];
+    }
+    return v;
+}
+
+static void sun4m_mctl_write(void *opaque, hwaddr off, uint64_t val,
+                             unsigned size)
+{
+    Sun4mMctl *m = opaque;
+    int i;
+
+    if (sun4m_mctl_is_mxcc(off)) {
+        cpu_sparc_mxcc_write(m->env, off, val, size);
+        return;
+    }
+    for (i = size - 1; i >= 0; i--) {
+        m->ram[off + i] = val;
+        val >>= 8;
+    }
+}
+
+static const MemoryRegionOps sun4m_mctl_ops = {
+    .read = sun4m_mctl_read,
+    .write = sun4m_mctl_write,
+    .endianness = DEVICE_BIG_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 8 },
+    .impl = { .min_access_size = 1, .max_access_size = 8 },
+};
+
 static void sun4m_hw_init(MachineState *machine)
 {
     const struct sun4m_hwdef *hwdef = SUN4M_MACHINE_GET_CLASS(machine)->hwdef;
@@ -1099,14 +1149,18 @@ static void sun4m_hw_init(MachineState *machine)
     if (hwdef->mctl_base) {
         /*
          * The Sun ROM reads and writes a few registers here while probing
-         * memory.  Their meaning is unknown; a plain register file lets it
-         * carry on.
+         * memory; their meaning is unknown, so most of the window is a plain
+         * register file. The MXCC registers at 0xa00 and up are the real
+         * ones, which is how the ROM learns the module's version and cache
+         * configuration.
          */
-        MemoryRegion *mctl = g_new(MemoryRegion, 1);
+        Sun4mMctl *m = g_new0(Sun4mMctl, 1);
 
-        memory_region_init_ram(mctl, NULL, "sun4m.mctl", 0x1000, &error_fatal);
+        m->env = &SPARC_CPU(cpus[0])->env;
+        memory_region_init_io(&m->io, NULL, &sun4m_mctl_ops, m, "sun4m.mctl",
+                              0x1000);
         memory_region_add_subregion(get_system_memory(), hwdef->mctl_base,
-                                    mctl);
+                                    &m->io);
     }
 
     dev = qdev_new("sysbus-m48t08");

@@ -206,7 +206,7 @@ static void sparc_cpu_parse_features(const char *typename, char *features,
 void cpu_sparc_set_id(CPUSPARCState *env, unsigned int cpu)
 {
 #if !defined(TARGET_SPARC64)
-    env->mxccregs[7] = ((cpu + 8) & 0xf) << 24;
+    env->mxccregs[7] = (((cpu + 8) & 0xf) << 24) | env->def.mxcc_version;
 #endif
 }
 
@@ -871,7 +871,6 @@ static void sparc_cpu_realizefn(DeviceState *dev, Error **errp)
 #if !defined(TARGET_SPARC64)
     env->mmuregs[0] |= env->def.mmu_version;
     cpu_sparc_set_id(env, 0);
-    env->mxccregs[7] |= env->def.mxcc_version;
 #else
     env->mmu_version = env->def.mmu_version;
     env->maxtl = env->def.maxtl;

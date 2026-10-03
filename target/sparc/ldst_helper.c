@@ -623,6 +623,42 @@ uint64_t helper_ld_asi(CPUSPARCState *env, target_ulong addr,
                                          " address, size: %d\n", addr, size);
             }
             break;
+        case 0x01c00000: /* MXCC stream data registers 0-3 */
+        case 0x01c00008:
+        case 0x01c00010:
+        case 0x01c00018:
+            if (size == 8) {
+                ret = env->mxccdata[(addr >> 3) & 3];
+            } else {
+                qemu_log_mask(LOG_UNIMP,
+                              "%08x: unimplemented access size: %d\n", addr,
+                              size);
+            }
+            break;
+        case 0x01c00100: /* MXCC stream source */
+        case 0x01c00200: /* MXCC stream destination */
+            if (size == 8) {
+                /*
+                 * Stream operations complete as soon as the register is
+                 * written, so report completion (bit 63) for guests that
+                 * poll it.
+                 */
+                ret = env->mxccregs[(addr >> 8) & 1] | (1ULL << 63);
+            } else {
+                qemu_log_mask(LOG_UNIMP,
+                              "%08x: unimplemented access size: %d\n", addr,
+                              size);
+            }
+            break;
+        case 0x01c00e00: /* MXCC error register */
+            if (size == 8) {
+                ret = env->mxccregs[6];
+            } else {
+                qemu_log_mask(LOG_UNIMP,
+                              "%08x: unimplemented access size: %d\n", addr,
+                              size);
+            }
+            break;
         case 0x01c00a00: /* MXCC control register */
             if (size == 8) {
                 ret = env->mxccregs[3];
@@ -1980,5 +2016,69 @@ void sparc_cpu_do_transaction_failed(CPUState *cs, hwaddr physaddr,
 
     sparc_raise_mmu_fault(cs, physaddr, is_write, is_exec,
                           is_asi, size, retaddr);
+}
+#endif
+
+#if !defined(CONFIG_USER_ONLY) && !defined(TARGET_SPARC64)
+/*
+ * The MXCC registers can also be reached with ordinary loads and stores in a
+ * window of physical address space (0xff8c00000 on the SS-20); the boot PROM
+ * identifies the module and its cache that way. The offsets match the ASI 2
+ * addresses minus 0x01c00000.
+ */
+static uint64_t *mxcc_window_reg(CPUSPARCState *env, hwaddr off)
+{
+    switch (off & ~7) {
+    case 0xa00:
+        return &env->mxccregs[3];
+    case 0xc00:
+        return &env->mxccregs[5];
+    case 0xe00:
+        return &env->mxccregs[6];
+    case 0xf00:
+        return &env->mxccregs[7];
+    default:
+        return NULL;
+    }
+}
+
+uint64_t cpu_sparc_mxcc_read(CPUSPARCState *env, hwaddr off, unsigned size)
+{
+    uint64_t *reg = mxcc_window_reg(env, off);
+
+    if (!reg) {
+        return 0;
+    }
+    if (size == 4) {
+        return (off & 4) ? (uint32_t)*reg : (uint32_t)(*reg >> 32);
+    }
+    return *reg;
+}
+
+void cpu_sparc_mxcc_write(CPUSPARCState *env, hwaddr off, uint64_t val,
+                          unsigned size)
+{
+    uint64_t *reg = mxcc_window_reg(env, off);
+
+    if (!reg) {
+        return;
+    }
+    if ((off & ~7) == 0xe00) {
+        /* writing a 1 bit clears the error */
+        if (size == 4) {
+            val = (off & 4) ? (uint32_t)val : (uint64_t)(uint32_t)val << 32;
+        }
+        *reg &= ~val;
+        return;
+    }
+    if (size == 4) {
+        if (off & 4) {
+            *reg = (*reg & 0xffffffff00000000ULL) | (uint32_t)val;
+        } else {
+            *reg = (*reg & 0xffffffffULL) | ((uint64_t)(uint32_t)val << 32);
+        }
+    } else {
+        *reg = val;
+    }
 }
 #endif

@@ -595,6 +595,12 @@ G_NORETURN void cpu_raise_exception_ra(CPUSPARCState *, int, uintptr_t);
 
 /* cpu_init.c */
 void cpu_sparc_set_id(CPUSPARCState *env, unsigned int cpu);
+#ifndef CONFIG_USER_ONLY
+/* MXCC registers as seen through their physical address window */
+uint64_t cpu_sparc_mxcc_read(CPUSPARCState *env, hwaddr off, unsigned size);
+void cpu_sparc_mxcc_write(CPUSPARCState *env, hwaddr off, uint64_t val,
+                          unsigned size);
+#endif
 /* mmu_helper.c */
 bool sparc_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                         MMUAccessType access_type, int mmu_idx,
