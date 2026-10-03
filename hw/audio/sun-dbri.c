@@ -553,19 +553,28 @@ static void dbri_out_callback(void *opaque, int avail)
     int fmt = dbri_codec_format(s);
     bool companded = fmt == CS4215_DFR_ULAW || fmt == CS4215_DFR_ALAW;
     int mult = companded ? 2 : 1;
-    int bpf = dbri_bytes_per_frame(s);
+    int obpf = dbri_bytes_per_frame(s);   /* bytes the codec plays per frame */
     uint8_t buf[4096];
+    uint8_t sel[4096];
     int16_t conv[4096];
     int idle = 0;
 
     while (avail > 0 && dbri_codec_live(s) && dbri_data_mode(s)) {
         DBRIPipe *p = dbri_find_pipe(s, true);
         uint32_t w1, ba, n, remaining;
+        uint32_t gbpf, frames, i;
         size_t written;
 
         if (!p) {
             return;
         }
+        /*
+         * The DBRI moves one time slot per codec frame, as wide as the
+         * driver defined it, whatever the codec's own format is: a driver
+         * may send stereo sized slots to a codec that plays mono, which
+         * then uses the first bytes of each slot.
+         */
+        gbpf = p->length >= 8 && p->length <= 64 ? p->length / 8 : obpf;
         w1 = dbri_ld(s, p->desc);
         if (!p->pos) {
             /* a descriptor is (re)started: clear its status */
@@ -579,37 +588,49 @@ static void dbri_out_callback(void *opaque, int avail)
         if (p->pos >= remaining) {
             n = 0;
         } else {
-            n = MIN(remaining - p->pos, (uint32_t)(avail / mult));
-            n = MIN(n, sizeof(buf));
-            n -= n % bpf;
+            n = MIN(remaining - p->pos, sizeof(buf));
+            n = MIN(n, (uint32_t)(avail / (mult * obpf)) * gbpf);
+            n -= n % gbpf;
         }
-        if (n) {
+        frames = n / gbpf;
+        if (frames) {
+            uint8_t *out = buf;
+            uint32_t outlen = frames * obpf;
+
             idle = 0;
             if (dma_memory_read(dbri_dma_as(s), ba + p->pos, buf, n,
                                 MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
                 p->desc = 0;
                 return;
             }
+            trace_sun_dbri_play_data(n, gbpf, ldl_be_p(buf),
+                                     n >= 8 ? ldl_be_p(buf + 4) : 0);
+            if (gbpf != obpf) {
+                for (i = 0; i < frames; i++) {
+                    memset(sel + i * obpf, 0, obpf);
+                    memcpy(sel + i * obpf, buf + i * gbpf,
+                           MIN(gbpf, (uint32_t)obpf));
+                }
+                out = sel;
+            }
             if (companded) {
-                uint32_t i;
-
-                for (i = 0; i < n; i++) {
+                for (i = 0; i < outlen; i++) {
                     conv[i] = fmt == CS4215_DFR_ULAW ?
-                              dbri_ulaw_to_s16(buf[i]) :
-                              dbri_alaw_to_s16(buf[i]);
+                              dbri_ulaw_to_s16(out[i]) :
+                              dbri_alaw_to_s16(out[i]);
                 }
                 written = audio_be_write(s->audio_be, s->voice_out, conv,
-                                         n * 2) / 2;
+                                         outlen * 2) / 2;
             } else {
-                written = audio_be_write(s->audio_be, s->voice_out, buf, n);
+                written = audio_be_write(s->audio_be, s->voice_out, out,
+                                         outlen);
             }
-            written -= written % bpf;
-            trace_sun_dbri_play_data(n, written, ldl_be_p(buf), ldl_be_p(buf + 4));
-            if (!written) {
+            frames = written / obpf;
+            if (!frames) {
                 return;
             }
-            p->pos += written;
-            avail -= written * mult;
+            p->pos += frames * gbpf;
+            avail -= frames * obpf * mult;
         }
 
         if (p->pos >= remaining) {
@@ -626,7 +647,7 @@ static void dbri_out_callback(void *opaque, int avail)
             p->desc = next;
             p->pos = 0;
         }
-        if (!n && (p->pos < remaining || ++idle > DBRI_NO_PIPES)) {
+        if (!frames && (p->pos < remaining || ++idle > DBRI_NO_PIPES)) {
             return;
         }
     }
