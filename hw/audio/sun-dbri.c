@@ -141,6 +141,7 @@ typedef struct DBRIPipe {
     uint32_t fixed_tx;    /* last value sent with SSP */
     uint32_t desc;        /* current descriptor, 0 when none */
     uint32_t pos;         /* bytes already used in the descriptor */
+    uint32_t last;        /* last descriptor of a finished chain (for CDP) */
     uint32_t reported;    /* last value reported for a fixed input pipe */
     bool have_reported;
 } DBRIPipe;
@@ -396,6 +397,7 @@ static void dbri_report_fixed(DBRIState *s, int p, uint32_t val, int len)
     }
     pp->have_reported = true;
     pp->reported = val;
+    /* with the MSB flag the drivers reverse the bit order themselves */
     if (pp->sdp & D_SDP_MSB) {
         val = reverse_bits(val, len);
     }
@@ -447,11 +449,6 @@ static void dbri_codec_frame(DBRIState *s)
             trace_sun_dbri_data(s->data[0], s->data[1], s->data[2],
                                 s->data[3]);
             dbri_set_out_volume(s);
-        }
-        if (s->pipes[21].in_linked) {
-            dbri_report_fixed(s, 21,
-                              ((s->data[1] & 0x7f) << 8) | s->data[2],
-                              s->pipes[21].length ?: 16);
         }
     }
 }
@@ -625,6 +622,7 @@ static void dbri_out_callback(void *opaque, int avail)
             } else if (w1 & DBRI_TD_M) {
                 dbri_post_chan(s, num, D_INTR_MINT, 0);
             }
+            p->last = next ? 0 : p->desc;
             p->desc = next;
             p->pos = 0;
         }
@@ -675,6 +673,7 @@ static void dbri_rec_timer_cb(void *opaque)
             } else if (w4 & DBRI_RD_M) {
                 dbri_post_chan(s, num, D_INTR_MINT, 0);
             }
+            p->last = next ? 0 : p->desc;
             p->desc = next;
             p->pos = 0;
         }
@@ -725,15 +724,18 @@ static void dbri_run(DBRIState *s)
             bool ptr_valid = val & D_SDP_P;
             uint32_t ptr = ptr_valid ? dbri_ld(s, s->cmd_ptr + 4) : 0;
 
-            p->sdp = val & 0x7ffff;
+            trace_sun_dbri_sdp(val & 0x1f, val, ptr);
+            p->sdp = val & 0xfffff;
             if (val & D_SDP_C) {
                 p->desc = 0;
+                p->last = 0;
                 p->pos = 0;
                 p->have_reported = false;
             }
             if (ptr_valid) {
                 p->desc = ptr;
                 p->pos = 0;
+                p->last = 0;
             }
             s->cmd_ptr += ptr_valid ? 8 : 4;
             break;
@@ -741,7 +743,20 @@ static void dbri_run(DBRIState *s)
         case D_CDP: {
             DBRIPipe *p = &s->pipes[val & 0x1f];
 
-            p->pos = 0;
+            trace_sun_dbri_cdp(val & 0x1f, p->desc, p->last);
+            /*
+             * Continue Data Pipe: drivers append descriptors to a chain
+             * that ended in a NULL link and tell the chip to look again.
+             */
+            if (!p->desc && p->last) {
+                uint32_t next = dbri_ld(s, p->last + 8);
+
+                if (next) {
+                    p->desc = next;
+                    p->pos = 0;
+                    p->last = 0;
+                }
+            }
             s->cmd_ptr += 4;
             break;
         }
@@ -941,7 +956,7 @@ static const MemoryRegionOps dbri_mem_ops = {
 
 static const VMStateDescription vmstate_dbri_pipe = {
     .name = "sun-DBRI/pipe",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(sdp, DBRIPipe),
@@ -952,6 +967,7 @@ static const VMStateDescription vmstate_dbri_pipe = {
         VMSTATE_UINT32(fixed_tx, DBRIPipe),
         VMSTATE_UINT32(desc, DBRIPipe),
         VMSTATE_UINT32(pos, DBRIPipe),
+        VMSTATE_UINT32_V(last, DBRIPipe, 2),
         VMSTATE_UINT32(reported, DBRIPipe),
         VMSTATE_BOOL(have_reported, DBRIPipe),
         VMSTATE_END_OF_LIST()
@@ -985,7 +1001,7 @@ static const VMStateDescription vmstate_dbri = {
         VMSTATE_UINT32(intq_idx, DBRIState),
         VMSTATE_UINT32(chi, DBRIState),
         VMSTATE_UINT32(cdm, DBRIState),
-        VMSTATE_STRUCT_ARRAY(pipes, DBRIState, DBRI_NO_PIPES, 1,
+        VMSTATE_STRUCT_ARRAY(pipes, DBRIState, DBRI_NO_PIPES, 2,
                              vmstate_dbri_pipe, DBRIPipe),
         VMSTATE_UINT8_ARRAY(ctrl, DBRIState, 4),
         VMSTATE_UINT8_ARRAY(data, DBRIState, 4),

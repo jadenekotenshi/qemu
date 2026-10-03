@@ -79,3 +79,5 @@ sun_dbri_play_open(int freq, int channels, int fmt) "open output: %d Hz, %d chan
 sun_dbri_play_data(uint32_t guest_len, uint32_t written, uint32_t w0, uint32_t w1) "offered %u guest bytes, backend took %u, first words 0x%08x 0x%08x"
 sun_dbri_data(uint8_t a, uint8_t b, uint8_t c, uint8_t d) "CS4215 data slots %02x %02x %02x %02x"
 sun_dbri_td(uint32_t addr, uint32_t w1, uint32_t ba, uint32_t nda) "TD @0x%08x: flags 0x%08x buffer 0x%08x next 0x%08x"
+sun_dbri_sdp(uint32_t pipe, uint32_t val, uint32_t ptr) "SDP pipe %u word 0x%08x pointer 0x%08x"
+sun_dbri_cdp(uint32_t pipe, uint32_t desc, uint32_t last) "CDP pipe %u (current 0x%08x, last 0x%08x)"
