@@ -826,32 +826,72 @@ static void dummy_fdc_tc(void *opaque, int irq, int level)
 }
 
 /*
- * A tiny FCode image that only names the DBRI node. Without it the Sun
- * boot PROM creates a node without a "name" property, which the OPENSTEP
- * kernel dereferences (strcmp on NULL) while autoconfiguring SBus.
+ * FCode for the DBRI's PROM space. Without it the Sun boot PROM creates a
+ * node with no "name" property, which the OPENSTEP kernel dereferences
+ * (strcmp on NULL) while autoconfiguring SBus. The image names the node and
+ * gives it the registers and interrupt the audio drivers look for.
  */
-static void sun4m_dbri_prom_init(hwaddr addr)
+static void sun4m_dbri_prom_init(hwaddr addr, hwaddr reg_off, int irq_level)
 {
-    static const uint8_t fcode[] = {
+    static const uint8_t fcode_head[] = {
         0xf1, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x12, 0x09, 'S', 'U', 'N', 'W', ',', 'D', 'B', 'R', 'I',
-        0x02, 0x01, 0x00
+        /* " SUNW,DBRIe" device-name */
+        0x12, 0x0a, 'S', 'U', 'N', 'W', ',', 'D', 'B', 'R', 'I', 'e',
+        0x02, 0x01,
     };
     MemoryRegion *prom = g_new(MemoryRegion, 1);
+    uint8_t fcode[128];
+    size_t n = 0;
     uint8_t *p;
     uint16_t sum = 0;
-    int i;
+    size_t i;
+
+#define FC_BYTES(...) do {                                          \
+        const uint8_t b_[] = { __VA_ARGS__ };                \
+        memcpy(fcode + n, b_, sizeof(b_));                          \
+        n += sizeof(b_);                                            \
+    } while (0)
+#define FC_INT(v) do {                                              \
+        uint32_t v_ = (v);                                          \
+        FC_BYTES(0x10, v_ >> 24, v_ >> 16, v_ >> 8, v_);            \
+    } while (0)
+#define FC_ENCODE_INT(v) do { FC_INT(v); FC_BYTES(0x01, 0x11); } while (0)
+#define FC_ENCODE_INT_PLUS(v) do {                                  \
+        FC_ENCODE_INT(v); FC_BYTES(0x01, 0x12);                     \
+    } while (0)
+#define FC_PROP(name) do {                                          \
+        FC_BYTES(0x12, sizeof(name) - 1);                           \
+        memcpy(fcode + n, name, sizeof(name) - 1);                  \
+        n += sizeof(name) - 1;                                      \
+        FC_BYTES(0x01, 0x10);                                       \
+    } while (0)
+
+    memcpy(fcode, fcode_head, sizeof(fcode_head));
+    n = sizeof(fcode_head);
+    /* reg: slot 0xe, offset, size */
+    FC_ENCODE_INT(0xe);
+    FC_ENCODE_INT_PLUS(reg_off);
+    FC_ENCODE_INT_PLUS(0x100);
+    FC_PROP("reg");
+    /* intr: level, vector; interrupts: level */
+    FC_ENCODE_INT(irq_level);
+    FC_ENCODE_INT_PLUS(0);
+    FC_PROP("intr");
+    FC_ENCODE_INT(irq_level);
+    FC_PROP("interrupts");
+    FC_BYTES(0x00);
+    assert(n <= sizeof(fcode));
 
     memory_region_init_rom(prom, NULL, "sun-DBRI.prom", 0x1000, &error_fatal);
     p = memory_region_get_ram_ptr(prom);
     memset(p, 0, 0x1000);
-    memcpy(p, fcode, sizeof(fcode));
-    for (i = 8; i < sizeof(fcode); i++) {
+    memcpy(p, fcode, n);
+    for (i = 8; i < n; i++) {
         sum += p[i];
     }
     p[2] = sum >> 8;
     p[3] = sum;
-    stl_be_p(p + 4, sizeof(fcode));
+    stl_be_p(p + 4, n);
     memory_region_add_subregion(get_system_memory(), addr, prom);
 }
 
@@ -1158,11 +1198,15 @@ static void sun4m_hw_init(MachineState *machine)
 
     if (hwdef->dbri_base) {
         /* ISDN chip with attached CS4215 audio codec */
-        /* prom space */
-        sun4m_dbri_prom_init(hwdef->dbri_base + 0x1000);
-        /* reg space */
-        create_unimplemented_device("sun-DBRI",
-                                    hwdef->dbri_base + 0x10000, 0x100);
+        DeviceState *dbri = qdev_new("sun-DBRI");
+        SysBusDevice *dbrisbd = SYS_BUS_DEVICE(dbri);
+
+        sun4m_dbri_prom_init(hwdef->dbri_base + 0x1000, 0x10000, 5);
+        object_property_set_link(OBJECT(dbri), "iommu", OBJECT(iommu),
+                                 &error_abort);
+        sysbus_realize_and_unref(dbrisbd, &error_fatal);
+        sysbus_mmio_map(dbrisbd, 0, hwdef->dbri_base + 0x10000);
+        sysbus_connect_irq(dbrisbd, 0, qdev_get_gpio_in(sbus5_orgate, 1));
     }
 
     if (hwdef->bpp_base) {

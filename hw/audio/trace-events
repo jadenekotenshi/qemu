@@ -68,3 +68,14 @@ virtio_snd_handle_event(void) "event queue callback called"
 virtio_snd_pcm_stream_flush(uint32_t stream) "flushing stream %"PRIu32
 virtio_snd_handle_tx_xfer(void) "tx queue callback called"
 virtio_snd_handle_rx_xfer(void) "rx queue callback called"
+
+# sun-dbri.c
+sun_dbri_reg_read(uint64_t addr, uint32_t val) "read 0x%02"PRIx64": 0x%08x"
+sun_dbri_reg_write(uint64_t addr, uint64_t val) "write 0x%02"PRIx64": 0x%08"PRIx64
+sun_dbri_cmd(uint32_t addr, uint32_t word) "command @0x%08x: 0x%08x"
+sun_dbri_intr(uint32_t word) "interrupt word 0x%08x"
+sun_dbri_ctrl(uint8_t a, uint8_t b, uint8_t c, uint8_t d) "CS4215 control %02x %02x %02x %02x"
+sun_dbri_play_open(int freq, int channels, int fmt) "open output: %d Hz, %d channels, format %d"
+sun_dbri_play_data(uint32_t guest_len, uint32_t written, uint32_t w0, uint32_t w1) "offered %u guest bytes, backend took %u, first words 0x%08x 0x%08x"
+sun_dbri_data(uint8_t a, uint8_t b, uint8_t c, uint8_t d) "CS4215 data slots %02x %02x %02x %02x"
+sun_dbri_td(uint32_t addr, uint32_t w1, uint32_t ba, uint32_t nda) "TD @0x%08x: flags 0x%08x buffer 0x%08x next 0x%08x"
