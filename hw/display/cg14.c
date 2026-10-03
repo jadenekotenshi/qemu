@@ -22,6 +22,9 @@
 #include "hw/core/sysbus.h"
 #include "migration/vmstate.h"
 #include "qom/object.h"
+#include "qemu/timer.h"
+#include "hw/core/irq.h"
+#include "qemu/log.h"
 #include "trace.h"
 
 #define TYPE_SUN_CG14 "sun-cg14"
@@ -60,6 +63,10 @@ struct CG14State {
     MemoryRegion planar;       /* X, B, G, R channels as separate planes */
     MemoryRegion planar16;     /* 16 bit planar views (accepted, unused) */
     QemuConsole *con;
+    qemu_irq irq;
+    QEMUTimer *vsync_timer;
+    QEMUTimer *ack_timer;
+    bool irq_level;
 
     uint8_t regs[CG14_REG_SIZE];
     uint8_t gamma[768];
@@ -75,6 +82,53 @@ struct CG14State {
 static void cg14_dirty_all(CG14State *s)
 {
     s->redraw = true;
+}
+
+/*
+ * Vertical retrace interrupt. When MCTL's interrupt enable is set the chip
+ * flags MSR (bits 0x10, with 0x20 for pollers) once per frame and drives the
+ * interrupt line until the driver acknowledges by writing MSR. Solaris
+ * applies its queued colour map updates from this interrupt.
+ */
+#define CG14_MCTL_INTR     0x80
+#define CG14_MSR           0x04
+#define CG14_MSR_INTR      0x30
+#define CG14_VSYNC_NS      16000000   /* about 62 Hz */
+#define CG14_INTR_HOLD_NS  1000000000LL /* give up if never acknowledged */
+
+static void cg14_set_irq(CG14State *s, bool level)
+{
+    if (s->irq_level != level) {
+        s->irq_level = level;
+        qemu_set_irq(s->irq, level);
+    }
+}
+
+static void cg14_intr_ack(CG14State *s)
+{
+    s->regs[CG14_MSR] &= ~CG14_MSR_INTR;
+    timer_del(s->ack_timer);
+    cg14_set_irq(s, false);
+}
+
+static void cg14_ack_timer_cb(void *opaque)
+{
+    /* nobody acknowledged for a long time: do not leave the line stuck */
+    cg14_set_irq(opaque, false);
+}
+
+static void cg14_vsync_cb(void *opaque)
+{
+    CG14State *s = opaque;
+
+    if (s->regs[CG14_MCTL] & CG14_MCTL_INTR) {
+        s->regs[CG14_MSR] |= CG14_MSR_INTR;
+        cg14_set_irq(s, true);
+        timer_mod(s->ack_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                                CG14_INTR_HOLD_NS);
+    }
+    timer_mod(s->vsync_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + CG14_VSYNC_NS);
 }
 
 static uint64_t cg14_regs_read(void *opaque, hwaddr addr, unsigned size)
@@ -112,6 +166,9 @@ static void cg14_regs_write(void *opaque, hwaddr addr, uint64_t val,
             s->gamma_idx = (s->gamma_idx + 1) % 768;
         }
         s->regs[a] = b;
+        if (a == CG14_MSR) {
+            cg14_intr_ack(s);
+        }
     }
     cg14_dirty_all(s);
 }
@@ -166,12 +223,16 @@ static const MemoryRegionOps cg14_planar_ops = {
 /* the 16 bit planar views are not modelled: reads give zero */
 static uint64_t cg14_null_read(void *opaque, hwaddr addr, unsigned size)
 {
+    qemu_log_mask(LOG_UNIMP, "cg14: unimplemented read at 0x%" HWADDR_PRIx
+                  " size %u\n", addr, size);
     return 0;
 }
 
 static void cg14_null_write(void *opaque, hwaddr addr, uint64_t val,
                             unsigned size)
 {
+    qemu_log_mask(LOG_UNIMP, "cg14: unimplemented write at 0x%" HWADDR_PRIx
+                  " size %u = 0x%" PRIx64 "\n", addr, size, val);
 }
 
 static const MemoryRegionOps cg14_null_ops = {
@@ -415,9 +476,15 @@ static void cg14_realize(DeviceState *dev, Error **errp)
         }
     }
 
+    s->vsync_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, cg14_vsync_cb, s);
+    s->ack_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, cg14_ack_timer_cb, s);
+    timer_mod(s->vsync_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + CG14_VSYNC_NS);
+
     memory_region_init_io(&s->regs_mr, OBJECT(s), &cg14_regs_ops, s,
                           "cg14.regs", CG14_REG_SIZE);
     sysbus_init_mmio(sbd, &s->regs_mr);
+    sysbus_init_irq(sbd, &s->irq);
 
     memory_region_init_ram(&s->vram_mem, OBJECT(s), "cg14.vram",
                            s->vram_size, &error_fatal);

@@ -1065,6 +1065,8 @@ static void sun4m_hw_init(MachineState *machine)
             qdev_prop_set_uint16(cg14, "width", graphic_width);
             qdev_prop_set_uint16(cg14, "height", graphic_height);
             sysbus_realize_and_unref(SYS_BUS_DEVICE(cg14), &error_fatal);
+            /* the VSIMM's own interrupt, PIL 8 ("interrupts" 8 in the PROM) */
+            sysbus_connect_irq(SYS_BUS_DEVICE(cg14), 0, slavio_irq[20]);
             /* the device picked the size if none was given */
             graphic_width = object_property_get_uint(OBJECT(cg14), "width",
                                                      &error_abort);
