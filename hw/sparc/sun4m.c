@@ -873,10 +873,14 @@ static void sun4m_dbri_prom_init(hwaddr addr, hwaddr reg_off, int irq_level)
     FC_ENCODE_INT_PLUS(reg_off);
     FC_ENCODE_INT_PLUS(0x100);
     FC_PROP("reg");
-    /* intr: level, vector; interrupts: level */
-    FC_ENCODE_INT(irq_level);
+    /*
+     * intr: the ROM's own SBus nodes use 0x20 + the SBus level (esp 0x24,
+     * le 0x26) followed by a zero vector
+     */
+    FC_ENCODE_INT(0x20 | irq_level);
     FC_ENCODE_INT_PLUS(0);
     FC_PROP("intr");
+    /* NetBSD and Linux read the plain SBus level from "interrupts" */
     FC_ENCODE_INT(irq_level);
     FC_PROP("interrupts");
     FC_BYTES(0x00);
