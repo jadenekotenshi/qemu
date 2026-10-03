@@ -387,6 +387,10 @@ static void dbri_report_fixed(DBRIState *s, int p, uint32_t val, int len)
 {
     DBRIPipe *pp = &s->pipes[p];
 
+    /* only pipes set up with an interrupt report mode (IRM) are reported */
+    if (!((pp->sdp >> 18) & 3)) {
+        return;
+    }
     if (pp->have_reported && pp->reported == val) {
         return;
     }
