@@ -81,3 +81,5 @@ sun_dbri_data(uint8_t a, uint8_t b, uint8_t c, uint8_t d) "CS4215 data slots %02
 sun_dbri_td(uint32_t addr, uint32_t w1, uint32_t ba, uint32_t nda) "TD @0x%08x: flags 0x%08x buffer 0x%08x next 0x%08x"
 sun_dbri_sdp(uint32_t pipe, uint32_t val, uint32_t ptr) "SDP pipe %u word 0x%08x pointer 0x%08x"
 sun_dbri_cdp(uint32_t pipe, uint32_t desc, uint32_t last) "CDP pipe %u (current 0x%08x, last 0x%08x)"
+sun_dbri_dts(uint32_t pipe, uint32_t val, uint32_t in_ts, uint32_t out_ts) "DTS pipe %u word 0x%08x in 0x%08x out 0x%08x"
+sun_dbri_ssp(uint32_t pipe, uint32_t data) "SSP pipe %u data 0x%08x"

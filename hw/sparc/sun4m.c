@@ -831,6 +831,8 @@ static void dummy_fdc_tc(void *opaque, int irq, int level)
  * (strcmp on NULL) while autoconfiguring SBus. The image names the node and
  * gives it the registers and interrupt the audio drivers look for.
  */
+static const uint8_t sun4m_sbus_level_to_pil[8] = { 0, 2, 3, 5, 7, 9, 11, 13 };
+
 static void sun4m_dbri_prom_init(hwaddr addr, hwaddr reg_off, int irq_level)
 {
     static const uint8_t fcode_head[] = {
@@ -874,10 +876,13 @@ static void sun4m_dbri_prom_init(hwaddr addr, hwaddr reg_off, int irq_level)
     FC_ENCODE_INT_PLUS(0x100);
     FC_PROP("reg");
     /*
-     * intr: the ROM's own SBus nodes use 0x20 + the SBus level (esp 0x24,
-     * le 0x26) followed by a zero vector
+     * intr: OPENSTEP indexes its handler table with it. On-board devices
+     * (esp 0x24, le 0x26) sit at 0x20 + PIL, but interrupts that arrive
+     * through the SBus system interrupt bits are dispatched from
+     * 0x30 + the PIL of that SBus level, so SBus level 5 must say 0x39.
+     * The second cell is a zero vector.
      */
-    FC_ENCODE_INT(0x20 | irq_level);
+    FC_ENCODE_INT(0x30 | sun4m_sbus_level_to_pil[irq_level & 7]);
     FC_ENCODE_INT_PLUS(0);
     FC_PROP("intr");
     /* NetBSD and Linux read the plain SBus level from "interrupts" */

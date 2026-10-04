@@ -45,6 +45,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(DBRIState, SUN_DBRI)
 #define DBRI_REGS_SIZE   0x100
 #define DBRI_NO_PIPES    32
 #define DBRI_INT_BLK     64
+#define DBRI_INTQ_VALID  0x80000000u
 
 /* Registers */
 #define REG0 0x00 /* status and control */
@@ -104,6 +105,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(DBRIState, SUN_DBRI)
 #define D_INTR_FXDT 10
 #define D_INTR_CMDI 6
 #define D_INTR_CMD  38
+#define D_INTR_CHIL 11   /* CHI lock, reported on the CHI channel */
+#define D_CHI_CHAN  36
 
 /* Transmit and receive descriptors */
 #define DBRI_TD_CNT(w)  (((w) >> 16) & 0x1fff)
@@ -128,6 +131,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(DBRIState, SUN_DBRI)
 
 /* Delay between a status change and the CPU seeing the interrupt */
 #define DBRI_IRQ_DELAY_NS (20 * 1000)
+#define DBRI_IRQ_HOLD_NS  (20 * 1000 * 1000)
 #define DBRI_REC_TICK_NS  (10 * 1000 * 1000)
 
 #define DBRI_MAX_CMDS 4096
@@ -152,6 +156,7 @@ struct DBRIState {
     MemoryRegion iomem;
     qemu_irq irq;
     QEMUTimer *irq_timer;
+    QEMUTimer *irq_hold;
     QEMUTimer *rec_timer;
     bool irq_level;
 
@@ -233,6 +238,7 @@ static void dbri_update_irq(DBRIState *s)
 
     if (!want) {
         timer_del(s->irq_timer);
+        timer_del(s->irq_hold);
         if (s->irq_level) {
             s->irq_level = false;
             qemu_set_irq(s->irq, 0);
@@ -250,6 +256,24 @@ static void dbri_irq_timer_cb(void *opaque)
     if ((s->reg1 & D_IR) && !s->irq_level) {
         s->irq_level = true;
         qemu_set_irq(s->irq, 1);
+        /*
+         * Drivers that poll the interrupt queue during initialisation do
+         * not read REG1 and have no handler yet; do not hold the line for
+         * ever or the CPU is flooded with interrupts nobody claims. IR
+         * stays set for a later REG1 read.
+         */
+        timer_mod(s->irq_hold,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + DBRI_IRQ_HOLD_NS);
+    }
+}
+
+static void dbri_irq_hold_cb(void *opaque)
+{
+    DBRIState *s = opaque;
+
+    if (s->irq_level) {
+        s->irq_level = false;
+        qemu_set_irq(s->irq, 0);
     }
 }
 
@@ -259,8 +283,19 @@ static void dbri_post(DBRIState *s, uint32_t word)
         return;
     }
     trace_sun_dbri_intr(word);
-    dbri_st(s, s->intq_base + 4 * s->intq_idx, word);
+    /*
+     * The chip tags every word it writes (bits 31:30 = 10); OPENSTEP's
+     * handler only consumes tagged entries and untags them as it goes.
+     * Linux and NetBSD only look at the channel and code fields.
+     */
+    dbri_st(s, s->intq_base + 4 * s->intq_idx, word | DBRI_INTQ_VALID);
     if (++s->intq_idx >= DBRI_INT_BLK) {
+        /* the first word of a block links to the next one */
+        uint32_t next = dbri_ld(s, s->intq_base);
+
+        if (next) {
+            s->intq_base = next;
+        }
         s->intq_idx = 1;
     }
     s->reg1 |= D_IR;
@@ -397,58 +432,143 @@ static void dbri_report_fixed(DBRIState *s, int p, uint32_t val, int len)
     }
     pp->have_reported = true;
     pp->reported = val;
-    /* with the MSB flag the drivers reverse the bit order themselves */
-    if (pp->sdp & D_SDP_MSB) {
-        val = reverse_bits(val, len);
-    }
-    dbri_post_chan(s, p, D_INTR_FXDT, val);
+    /*
+     * Short pipes shift bits in LSB first, the codec sends MSB first, so
+     * the word the driver sees is bit reversed (drivers undo that).
+     */
+    dbri_post_chan(s, p, D_INTR_FXDT, reverse_bits(val, len));
 }
 
+/* Bits in one CHI frame, from the CHI command */
+static unsigned dbri_chi_frame_bits(DBRIState *s)
+{
+    unsigned bpf = s->chi & 0x7ff;
+
+    if (bpf) {
+        return bpf;
+    }
+    /*
+     * Master mode without a frame length (OPENSTEP): the driver keeps the
+     * same time slot cycles whatever clock divisor it programs, and they
+     * only make sense for a 256 bit frame.
+     */
+    return 256;
+}
+
+/* First codec slot (byte) a time slot covers, or -1 */
+static int dbri_slot_of(DBRIState *s, DBRIPipe *p)
+{
+    unsigned pos = p->cycle % dbri_chi_frame_bits(s);
+
+    return pos < 64 ? pos / 8 : -1;
+}
+
+/*
+ * The CS4215 sees eight byte wide slots per frame. Drivers describe which
+ * pipe covers which slots with time slot definitions, and the numbering of
+ * the pipes differs between drivers (Linux sends control on 17 and data on
+ * 20, OPENSTEP the other way round), so look at the slots rather than the
+ * pipe numbers.
+ */
 static void dbri_codec_frame(DBRIState *s)
 {
-    DBRIPipe *p;
+    uint8_t tx[8] = { 0 };
+    bool tx_has[8] = { false };
+    uint8_t up[8] = { 0 };
+    int i;
 
     if (!dbri_codec_live(s)) {
         return;
     }
 
-    if (!dbri_data_mode(s)) {
-        p = &s->pipes[17];
-        if (p->out_linked) {
-            uint32_t v = p->fixed_tx;
+    /* what the DBRI sends */
+    for (i = 16; i < DBRI_NO_PIPES; i++) {
+        DBRIPipe *p = &s->pipes[i];
+        int slot, nbytes, k;
+        uint32_t orig;
 
-            if (p->sdp & D_SDP_MSB) {
-                v = reverse_bits(v, 32);
-            }
-            s->ctrl[0] = v >> 24;
-            s->ctrl[1] = v >> 16;
-            s->ctrl[2] = v >> 8;
-            s->ctrl[3] = v;
+        if (D_SDP_MODE(p->sdp) != D_SDP_FIXED || !(p->sdp & D_SDP_TO_SER) ||
+            !p->out_linked || p->length < 8 || p->length > 32) {
+            continue;
+        }
+        slot = dbri_slot_of(s, p);
+        nbytes = p->length / 8;
+        if (slot < 0 || slot + nbytes > 8) {
+            continue;
+        }
+        /* sent LSB first, but the codec reads MSB first */
+        orig = reverse_bits(p->fixed_tx, p->length);
+        for (k = 0; k < nbytes; k++) {
+            tx[slot + k] = orig >> (8 * (nbytes - 1 - k));
+            tx_has[slot + k] = true;
+        }
+    }
+
+    if (!dbri_data_mode(s)) {
+        if (tx_has[0]) {
+            memcpy(s->ctrl, tx, 4);
             trace_sun_dbri_ctrl(s->ctrl[0], s->ctrl[1], s->ctrl[2],
                                 s->ctrl[3]);
         }
-        if (s->pipes[18].in_linked) {
-            dbri_report_fixed(s, 18, s->ctrl[0], s->pipes[18].length ?: 8);
-        }
-        if (s->pipes[19].in_linked) {
-            dbri_report_fixed(s, 19, CS4215_VERSION,
-                              s->pipes[19].length ?: 8);
+        /* control mode readback: status (slot 1), echo, version (slot 7) */
+        up[0] = s->ctrl[0] | 0x20;
+        memcpy(up + 1, s->ctrl + 1, 3);
+        up[6] = CS4215_VERSION;
+        for (i = 16; i < DBRI_NO_PIPES; i++) {
+            DBRIPipe *p = &s->pipes[i];
+            int slot, nbytes, k;
+            uint32_t word = 0;
+
+            if (D_SDP_MODE(p->sdp) != D_SDP_FIXED ||
+                (p->sdp & D_SDP_TO_SER) || !p->in_linked ||
+                p->length < 8 || p->length > 32) {
+                continue;
+            }
+            slot = dbri_slot_of(s, p);
+            nbytes = p->length / 8;
+            if (slot < 0 || slot + nbytes > 8) {
+                continue;
+            }
+            for (k = 0; k < nbytes; k++) {
+                word = (word << 8) | up[slot + k];
+            }
+            dbri_report_fixed(s, i, word, p->length);
         }
     } else {
-        p = &s->pipes[20];
-        if (p->out_linked) {
-            uint32_t v = p->fixed_tx;
-
-            if (p->sdp & D_SDP_MSB) {
-                v = reverse_bits(v, 32);
-            }
-            s->data[0] = v >> 24;
-            s->data[1] = v >> 16;
-            s->data[2] = v >> 8;
-            s->data[3] = v;
+        if (tx_has[4]) {
+            memcpy(s->data, tx + 4, 4);
             trace_sun_dbri_data(s->data[0], s->data[1], s->data[2],
                                 s->data[3]);
             dbri_set_out_volume(s);
+        }
+        /*
+         * Data mode readback: the codec echoes the control bytes in slots
+         * 5 and 6, and OPENSTEP waits for a report of them (its "DM_R"
+         * pipe, 10 bits wide) before it switches the codec back to control
+         * mode to change the sample format.
+         */
+        up[4] = s->data[0];
+        up[5] = s->data[1];
+        for (i = 16; i < DBRI_NO_PIPES; i++) {
+            DBRIPipe *p = &s->pipes[i];
+            int slot, nbytes, k;
+            uint32_t word = 0;
+
+            if (D_SDP_MODE(p->sdp) != D_SDP_FIXED ||
+                (p->sdp & D_SDP_TO_SER) || !p->in_linked ||
+                p->length < 1 || p->length > 16) {
+                continue;
+            }
+            slot = dbri_slot_of(s, p);
+            nbytes = (p->length + 7) / 8;
+            if (slot < 4 || slot > 5 || slot + nbytes > 8) {
+                continue;
+            }
+            for (k = 0; k < nbytes; k++) {
+                word = (word << 8) | up[slot + k];
+            }
+            dbri_report_fixed(s, i, word >> (8 * nbytes - p->length),
+                              p->length);
         }
     }
 }
@@ -785,6 +905,9 @@ static void dbri_run(DBRIState *s)
             DBRIPipe *p = &s->pipes[val & 0x1f];
             bool ins = val & D_DTS_INS;
 
+            trace_sun_dbri_dts(val & 0x1f, val, dbri_ld(s, s->cmd_ptr + 4),
+                               dbri_ld(s, s->cmd_ptr + 8));
+
             if (val & D_DTS_VI) {
                 uint32_t ts = dbri_ld(s, s->cmd_ptr + 4);
 
@@ -800,12 +923,15 @@ static void dbri_run(DBRIState *s)
                 p->cycle = (ts >> 14) & 0x3ff;
             }
             s->cmd_ptr += 12;
+            /* the codec may only now be connected to the pipe */
+            dbri_codec_frame(s);
             break;
         }
         case D_SSP: {
             DBRIPipe *p = &s->pipes[val & 0x1f];
 
             p->fixed_tx = dbri_ld(s, s->cmd_ptr + 4);
+            trace_sun_dbri_ssp(val & 0x1f, p->fixed_tx);
             s->cmd_ptr += 8;
             dbri_codec_frame(s);
             break;
@@ -813,6 +939,16 @@ static void dbri_run(DBRIState *s)
         case D_CHI:
             s->chi = val;
             s->cmd_ptr += 4;
+            /*
+             * A CHI that makes the DBRI the clock master without a frame
+             * length (OPENSTEP) is followed by the chip reporting that it
+             * has locked; the driver's codec setup sits in a state waiting
+             * for it and gives up with "Unable to communicate with
+             * speakerbox" otherwise.
+             */
+            if (((val >> 16) & 0xff) && !(val & 0x7ff)) {
+                dbri_post_chan(s, D_CHI_CHAN, D_INTR_CHIL, 0);
+            }
             break;
         case D_CDM:
             s->cdm = val;
@@ -835,6 +971,7 @@ static void dbri_run(DBRIState *s)
 static void dbri_reset_state(DBRIState *s)
 {
     timer_del(s->irq_timer);
+    timer_del(s->irq_hold);
     timer_del(s->rec_timer);
     if (s->irq_level) {
         s->irq_level = false;
@@ -1066,6 +1203,7 @@ static void dbri_realize(DeviceState *dev, Error **errp)
         s->audio_be = NULL;
     }
     s->irq_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, dbri_irq_timer_cb, s);
+    s->irq_hold = timer_new_ns(QEMU_CLOCK_VIRTUAL, dbri_irq_hold_cb, s);
     s->rec_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, dbri_rec_timer_cb, s);
 }
 
@@ -1075,6 +1213,7 @@ static void dbri_unrealize(DeviceState *dev)
 
     dbri_close_out(s);
     timer_free(s->irq_timer);
+    timer_free(s->irq_hold);
     timer_free(s->rec_timer);
 }
 
