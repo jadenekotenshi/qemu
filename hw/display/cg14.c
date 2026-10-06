@@ -51,6 +51,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(CG14State, SUN_CG14)
 #define CG14_CLUT1         0x4000
 #define CG14_CLUT2         0x5000
 #define CG14_CLUT_SIZE     0x1000
+#define CG14_LUT_PORT      0xf000 /* data port of the auto increment LUTs */
 
 #define CG14_FB_8BIT       0x00000000
 #define CG14_FB_CBGR       0x01000000
@@ -73,6 +74,8 @@ struct CG14State {
     uint8_t regs[CG14_REG_SIZE];
     uint8_t gamma[768];
     uint32_t gamma_idx;   /* next gamma LUT component to be written */
+    int lut_sel;          /* table the 0xf000 port loads: 0 XLUT, 1..3 CLUT */
+    unsigned lut_idx;     /* next entry the port loads */
 
     uint32_t vram_size;
     uint16_t width, height;
@@ -146,6 +149,37 @@ static uint64_t cg14_regs_read(void *opaque, hwaddr addr, unsigned size)
     return val;
 }
 
+/*
+ * The XLUT and the CLUTs can be loaded through an auto increment port:
+ * writing the "inc" window of a table (offset 0x800 in it, one byte or word
+ * per entry) selects the table and the first entry, and writes to the port
+ * at 0xf000 then store consecutive entries (bytes for the XLUT, words for
+ * the CLUTs). Solaris loads its colour maps that way.
+ */
+static void cg14_lut_select(CG14State *s, hwaddr a)
+{
+    if (a >= 0x3800 && a < 0x3c00) {
+        s->lut_sel = 0;
+        s->lut_idx = a - 0x3800;
+    } else if (a >= 0x4800 && a < 0x7000 && (a & 0xfff) >= 0x800 &&
+               (a & 0xfff) < 0xc00) {
+        s->lut_sel = (a >> 12) - 3;
+        s->lut_idx = ((a & 0xfff) - 0x800) / 4;
+    }
+}
+
+static void cg14_lut_port_write(CG14State *s, uint64_t val, unsigned size)
+{
+    if (s->lut_sel == 0) {
+        s->regs[0x3000 + (s->lut_idx & 0xff)] = val;
+    } else {
+        stl_be_p(&s->regs[CG14_CLUT1 + (s->lut_sel - 1) * CG14_CLUT_SIZE +
+                          (s->lut_idx & 0xff) * 4], val);
+    }
+    s->lut_idx++;
+    cg14_dirty_all(s);
+}
+
 static void cg14_regs_write(void *opaque, hwaddr addr, uint64_t val,
                             unsigned size)
 {
@@ -153,6 +187,10 @@ static void cg14_regs_write(void *opaque, hwaddr addr, uint64_t val,
     unsigned i;
 
     trace_cg14_reg_write(addr, size, val);
+    if (addr == CG14_LUT_PORT) {
+        cg14_lut_port_write(s, val, size);
+        return;
+    }
     for (i = 0; i < size; i++) {
         uint8_t b = val >> (8 * (size - 1 - i));
         hwaddr a = (addr + i) & (CG14_REG_SIZE - 1);
@@ -168,6 +206,7 @@ static void cg14_regs_write(void *opaque, hwaddr addr, uint64_t val,
             s->gamma_idx = (s->gamma_idx + 1) % 768;
         }
         s->regs[a] = b;
+        cg14_lut_select(s, a);
         if (a == CG14_MSR) {
             cg14_intr_ack(s);
         }
@@ -324,6 +363,15 @@ static void cg14_draw_32(CG14State *s, uint8_t *d, const uint8_t *v)
     for (x = 0; x < s->width; x++) {
         const uint8_t *px = &v[4 * x];     /* X B G R */
         uint8_t xl = s->regs[CG14_XLUT + px[0]];
+
+        /*
+         * Solaris keeps an 8 bit visual in the B byte and selects CLUT1
+         * through the packed pixel register (like the hardware does in
+         * 8 bit mode), whatever its XLUT says.
+         */
+        if ((s->regs[CG14_PPR] & 0xf0) == 0x40) {
+            xl = 0x40;
+        }
         unsigned r = px[3], g = px[2], b = px[1];
 
         if (xl) {
