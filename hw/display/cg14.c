@@ -372,6 +372,15 @@ static void cg14_draw_32(CG14State *s, uint8_t *d, const uint8_t *v)
 
             if (lsrc) {
                 unsigned idx = lc == 3 ? px[3] : lc == 2 ? px[2] : px[1];
+
+                /*
+                 * Solaris gives windows XLUT entries for CLUT2 (0x80) but
+                 * only ever loads its 8 bit palette into CLUT1, which is
+                 * what they show.
+                 */
+                if (!lc && lsrc != 1) {
+                    lsrc = 1;
+                }
                 const uint8_t *e = &s->regs[CG14_CLUT1 +
                     (lsrc - 1) * CG14_CLUT_SIZE + idx * 4];
 
@@ -409,6 +418,49 @@ static void cg14_update_geometry(CG14State *s)
         qemu_console_resize(s->con, w, h);
         s->redraw = true;
     }
+}
+
+static inline uint32_t cg14_clut_rgb(CG14State *s, uint32_t v)
+{
+    return rgb_to_pixel32(v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff);
+}
+
+/*
+ * The hardware cursor: 32x32, two planes at 0x1000 (mask) and 0x1080
+ * (colour select), one 32 bit word per row, leftmost pixel in the top bit;
+ * control at 0x1100 (bit 2 enables), x and y (signed, hotspot
+ * already subtracted) at 0x1104/0x1106 and the two colours (0x00BBGGRR) at
+ * 0x1108 and 0x110c.
+ */
+static void cg14_draw_cursor(CG14State *s, uint8_t *d, int stride)
+{
+    int cx, cy, row, col;
+
+    if (!(s->regs[0x1100] & 0x04)) {
+        return;
+    }
+    cx = (int16_t)lduw_be_p(&s->regs[0x1104]);
+    cy = (int16_t)lduw_be_p(&s->regs[0x1106]);
+    for (row = 0; row < 32; row++) {
+        uint32_t m = ldl_be_p(&s->regs[0x1000 + 4 * row]);
+        uint32_t c = ldl_be_p(&s->regs[0x1080 + 4 * row]);
+        int y = cy + row;
+
+        if (y < 0 || y >= s->height) {
+            continue;
+        }
+        for (col = 0; col < 32; col++) {
+            unsigned bit = 31 - col; /* pixel 0 is the top bit */
+            int x = cx + col;
+
+            if (x < 0 || x >= s->width || !((m >> bit) & 1)) {
+                continue;
+            }
+            *(uint32_t *)(d + y * stride + 4 * x) = cg14_clut_rgb(
+                s, ldl_be_p(&s->regs[((c >> bit) & 1) ? 0x110c : 0x1108]));
+        }
+    }
+    qemu_console_update(s->con, MAX(cx, 0), MAX(cy, 0), 32, 32);
 }
 
 static bool cg14_update_display(void *opaque)
@@ -476,6 +528,7 @@ static bool cg14_update_display(void *opaque)
     if (y0 >= 0) {
         qemu_console_update(s->con, 0, y0, s->width, y - y0);
     }
+    cg14_draw_cursor(s, d, stride);
     s->redraw = false;
     g_free(snap);
     return true;
