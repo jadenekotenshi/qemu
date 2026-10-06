@@ -103,8 +103,16 @@ config LASI_82596
     bool
     select I82596_COMMON
 
+config SUNHME_CORE
+    bool
+
 config SUNHME
     bool
+    select SUNHME_CORE
+
+config SUNHME_SBUS
+    bool
+    select SUNHME_CORE
 
 config FTGMAC100
     bool

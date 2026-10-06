@@ -41,6 +41,7 @@
 #include "system/system.h"
 #include "net/net.h"
 #include "hw/core/boards.h"
+#include "hw/core/hotplug.h"
 #include "hw/scsi/esp.h"
 #include "hw/nvram/sun_nvram.h"
 #include "hw/core/qdev-properties.h"
@@ -979,6 +980,10 @@ static const MemoryRegionOps sun4m_mctl_ops = {
     .impl = { .min_access_size = 1, .max_access_size = 8 },
 };
 
+/* for the add-on SBus cards, see sun4m_machine_plug() */
+static IOMMUState *sun4m_iommu_dev;
+static qemu_irq sun4m_slavio_irq[32];
+
 static void sun4m_hw_init(MachineState *machine)
 {
     const struct sun4m_hwdef *hwdef = SUN4M_MACHINE_GET_CLASS(machine)->hwdef;
@@ -1050,6 +1055,8 @@ static void sun4m_hw_init(MachineState *machine)
 
     iommu = iommu_init(hwdef->iommu_base, hwdef->iommu_version,
                        slavio_irq[30]);
+    sun4m_iommu_dev = iommu;
+    memcpy(sun4m_slavio_irq, slavio_irq, sizeof(slavio_irq));
 
     if (hwdef->iommu_pad_base) {
         /* On the real hardware (SS-5, LX) the MMU is not padded, but aliased.
@@ -1369,15 +1376,71 @@ enum {
     ss600mp_id,
 };
 
+/*
+ * Add-on SBus cards (-device sun-hme-sbus,slot=N): the machine maps them
+ * into their slot, hands them the IOMMU to DMA through and wires their
+ * interrupt level to the system interrupt controller.
+ */
+static hwaddr sun4m_sbus_slot_base(const struct sun4m_hwdef *hwdef,
+                                   unsigned slot)
+{
+    /* SS-10/20/600MP: 0xe_n000_0000; SS-5 and friends: 0x2000_0000 + n<<28 */
+    hwaddr base = hwdef->tcx_base >= 0x100000000ULL ? 0xe00000000ULL
+                                                    : 0x20000000ULL;
+
+    return base + ((hwaddr)slot << 28);
+}
+
+static const HotplugHandler *
+sun4m_get_hotplug_handler(MachineState *machine, DeviceState *dev)
+{
+    if (object_dynamic_cast(OBJECT(dev), "sun-hme-sbus")) {
+        return HOTPLUG_HANDLER(machine);
+    }
+    return NULL;
+}
+
+static void sun4m_machine_pre_plug(const HotplugHandler *hotplug_dev,
+                                   DeviceState *dev, Error **errp)
+{
+    object_property_set_link(OBJECT(dev), "iommu", OBJECT(sun4m_iommu_dev),
+                             errp);
+}
+
+static void sun4m_machine_plug(const HotplugHandler *hotplug_dev,
+                               DeviceState *dev, Error **errp)
+{
+    Sun4mMachineClass *smc = SUN4M_MACHINE_GET_CLASS(OBJECT(hotplug_dev));
+    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
+    unsigned slot = object_property_get_uint(OBJECT(dev), "slot", errp);
+    unsigned level = object_property_get_uint(OBJECT(dev), "irq-level", errp);
+
+    if (*errp) {
+        return;
+    }
+    if (slot > 3) {
+        error_setg(errp, "SBus slot must be 0..3");
+        return;
+    }
+    sysbus_mmio_map(sbd, 0, sun4m_sbus_slot_base(smc->hwdef, slot));
+    /* SBus levels 1..7 are system interrupt bits 7..13 */
+    sysbus_connect_irq(sbd, 0, sun4m_slavio_irq[6 + level]);
+}
+
 static void sun4m_machine_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
+    HotplugHandlerClass *hc = HOTPLUG_HANDLER_CLASS(oc);
 
     mc->init = sun4m_hw_init;
     mc->block_default_type = IF_SCSI;
     mc->default_boot_order = "c";
     mc->default_display = "tcx";
     mc->default_ram_id = "sun4m.ram";
+    mc->get_hotplug_handler = sun4m_get_hotplug_handler;
+    hc->pre_plug = sun4m_machine_pre_plug;
+    hc->plug = sun4m_machine_plug;
+    machine_class_allow_dynamic_sysbus_dev(mc, "sun-hme-sbus");
 }
 
 static void ss5_class_init(ObjectClass *oc, const void *data)
@@ -1743,6 +1806,10 @@ static const TypeInfo sun4m_machine_types[] = {
         .class_size     = sizeof(Sun4mMachineClass),
         .class_init     = sun4m_machine_class_init,
         .abstract       = true,
+        .interfaces     = (const InterfaceInfo[]) {
+            { TYPE_HOTPLUG_HANDLER },
+            { }
+        },
     }
 };
 

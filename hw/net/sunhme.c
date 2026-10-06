@@ -23,7 +23,7 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/pci/pci_device.h"
+#include "hw/net/sunhme.h"
 #include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "hw/net/mii.h"
@@ -35,9 +35,7 @@
 #include "trace.h"
 #include "qom/object.h"
 
-#define HME_REG_SIZE                   0x8000
 
-#define HME_SEB_REG_SIZE               0x2000
 
 #define HME_SEBI_RESET                 0x0
 #define HME_SEB_RESET_ETX              0x1
@@ -54,7 +52,6 @@
 #define HME_SEBI_IMASK                 0x104
 #define HME_SEBI_IMASK_LINUXBUG        0x10c
 
-#define HME_ETX_REG_SIZE               0x2000
 
 #define HME_ETXI_PENDING               0x0
 
@@ -64,7 +61,6 @@
 
 #define HME_ETXI_RSIZE                 0x2c
 
-#define HME_ERX_REG_SIZE               0x2000
 
 #define HME_ERXI_CFG                   0x0
 #define HME_ERX_CFG_RINGSIZE           0x600
@@ -78,7 +74,6 @@
 #define HME_ERXI_RING_ADDR             0xffffff00
 #define HME_ERXI_RING_OFFSET           0xff
 
-#define HME_MAC_REG_SIZE               0x1000
 
 #define HME_MACI_TXCFG                 0x20c
 #define HME_MAC_TXCFG_ENABLE           0x1
@@ -97,7 +92,6 @@
 #define HME_MACI_HASHTAB1              0x348
 #define HME_MACI_HASHTAB0              0x34c
 
-#define HME_MIF_REG_SIZE               0x20
 
 #define HME_MIFI_FO                    0xc
 #define HME_MIF_FO_ST                  0xc0000000
@@ -129,8 +123,6 @@
 #define MII_COMMAND_READ       0x2
 #define MII_COMMAND_WRITE      0x1
 
-#define TYPE_SUNHME "sunhme"
-OBJECT_DECLARE_SIMPLE_TYPE(SunHMEState, SUNHME)
 
 /* Maximum size of buffer */
 #define HME_FIFO_SIZE          0x800
@@ -154,32 +146,32 @@ OBJECT_DECLARE_SIMPLE_TYPE(SunHMEState, SUNHME)
 
 #define HME_MII_REGS_SIZE      0x20
 
-struct SunHMEState {
-    /*< private >*/
-    PCIDevice parent_obj;
+static void sunhme_dma_read(SunHMEState *s, hwaddr addr, void *buf, size_t len)
+{
+    address_space_read(s->as, addr, MEMTXATTRS_UNSPECIFIED, buf, len);
+}
 
-    NICState *nic;
-    NICConf conf;
+static void sunhme_dma_write(SunHMEState *s, hwaddr addr, const void *buf,
+                             size_t len)
+{
+    address_space_write(s->as, addr, MEMTXATTRS_UNSPECIFIED, buf, len);
+}
 
-    MemoryRegion hme;
-    MemoryRegion sebreg;
-    MemoryRegion etxreg;
-    MemoryRegion erxreg;
-    MemoryRegion macreg;
-    MemoryRegion mifreg;
+/* descriptor words are little endian on PCI and big endian on SBus */
+static uint32_t sunhme_ld(SunHMEState *s, hwaddr addr)
+{
+    uint32_t v = 0;
 
-    uint32_t sebregs[HME_SEB_REG_SIZE >> 2];
-    uint32_t etxregs[HME_ETX_REG_SIZE >> 2];
-    uint32_t erxregs[HME_ERX_REG_SIZE >> 2];
-    uint32_t macregs[HME_MAC_REG_SIZE >> 2];
-    uint32_t mifregs[HME_MIF_REG_SIZE >> 2];
+    sunhme_dma_read(s, addr, &v, 4);
+    return s->big_endian ? be32_to_cpu(v) : le32_to_cpu(v);
+}
 
-    uint16_t miiregs[HME_MII_REGS_SIZE];
-};
+static void sunhme_st(SunHMEState *s, hwaddr addr, uint32_t val)
+{
+    uint32_t v = s->big_endian ? cpu_to_be32(val) : cpu_to_le32(val);
 
-static const Property sunhme_properties[] = {
-    DEFINE_NIC_PROPERTIES(SunHMEState, conf),
-};
+    sunhme_dma_write(s, addr, &v, 4);
+}
 
 static void sunhme_reset_tx(SunHMEState *s)
 {
@@ -195,7 +187,6 @@ static void sunhme_reset_rx(SunHMEState *s)
 
 static void sunhme_update_irq(SunHMEState *s)
 {
-    PCIDevice *d = PCI_DEVICE(s);
     int level;
 
     /* MIF interrupt mask (16-bit) */
@@ -213,13 +204,13 @@ static void sunhme_update_irq(SunHMEState *s)
     level = (seb ? 1 : 0);
     trace_sunhme_update_irq(mifmask, mif, sebmask, seb, level);
 
-    pci_set_irq(d, level);
+    s->set_irq(s->irq_opaque, level);
 }
 
 static void sunhme_seb_write(void *opaque, hwaddr addr,
                           uint64_t val, unsigned size)
 {
-    SunHMEState *s = SUNHME(opaque);
+    SunHMEState *s = opaque;
 
     trace_sunhme_seb_write(addr, val);
 
@@ -254,7 +245,7 @@ static void sunhme_seb_write(void *opaque, hwaddr addr,
 static uint64_t sunhme_seb_read(void *opaque, hwaddr addr,
                              unsigned size)
 {
-    SunHMEState *s = SUNHME(opaque);
+    SunHMEState *s = opaque;
     uint64_t val;
 
     /* Handly buggy Linux drivers before 4.13 which have
@@ -300,7 +291,7 @@ static void sunhme_transmit(SunHMEState *s);
 static void sunhme_etx_write(void *opaque, hwaddr addr,
                           uint64_t val, unsigned size)
 {
-    SunHMEState *s = SUNHME(opaque);
+    SunHMEState *s = opaque;
 
     trace_sunhme_etx_write(addr, val);
 
@@ -318,7 +309,7 @@ static void sunhme_etx_write(void *opaque, hwaddr addr,
 static uint64_t sunhme_etx_read(void *opaque, hwaddr addr,
                              unsigned size)
 {
-    SunHMEState *s = SUNHME(opaque);
+    SunHMEState *s = opaque;
     uint64_t val;
 
     val = s->etxregs[addr >> 2];
@@ -341,7 +332,7 @@ static const MemoryRegionOps sunhme_etx_ops = {
 static void sunhme_erx_write(void *opaque, hwaddr addr,
                           uint64_t val, unsigned size)
 {
-    SunHMEState *s = SUNHME(opaque);
+    SunHMEState *s = opaque;
 
     trace_sunhme_erx_write(addr, val);
 
@@ -351,7 +342,7 @@ static void sunhme_erx_write(void *opaque, hwaddr addr,
 static uint64_t sunhme_erx_read(void *opaque, hwaddr addr,
                              unsigned size)
 {
-    SunHMEState *s = SUNHME(opaque);
+    SunHMEState *s = opaque;
     uint64_t val;
 
     val = s->erxregs[addr >> 2];
@@ -374,7 +365,7 @@ static const MemoryRegionOps sunhme_erx_ops = {
 static void sunhme_mac_write(void *opaque, hwaddr addr,
                           uint64_t val, unsigned size)
 {
-    SunHMEState *s = SUNHME(opaque);
+    SunHMEState *s = opaque;
     uint64_t oldval = s->macregs[addr >> 2];
 
     trace_sunhme_mac_write(addr, val);
@@ -394,7 +385,7 @@ static void sunhme_mac_write(void *opaque, hwaddr addr,
 static uint64_t sunhme_mac_read(void *opaque, hwaddr addr,
                              unsigned size)
 {
-    SunHMEState *s = SUNHME(opaque);
+    SunHMEState *s = opaque;
     uint64_t val;
 
     val = s->macregs[addr >> 2];
@@ -455,7 +446,7 @@ static uint16_t sunhme_mii_read(SunHMEState *s, uint8_t reg)
 static void sunhme_mif_write(void *opaque, hwaddr addr,
                           uint64_t val, unsigned size)
 {
-    SunHMEState *s = SUNHME(opaque);
+    SunHMEState *s = opaque;
     uint8_t cmd, reg;
     uint16_t data;
 
@@ -508,7 +499,7 @@ static void sunhme_mif_write(void *opaque, hwaddr addr,
 static uint64_t sunhme_mif_read(void *opaque, hwaddr addr,
                              unsigned size)
 {
-    SunHMEState *s = SUNHME(opaque);
+    SunHMEState *s = opaque;
     uint64_t val;
 
     val = s->mifregs[addr >> 2];
@@ -561,8 +552,7 @@ static inline void sunhme_set_tx_ring_nr(SunHMEState *s, int i)
 
 static void sunhme_transmit(SunHMEState *s)
 {
-    PCIDevice *d = PCI_DEVICE(s);
-    dma_addr_t tb, addr;
+    hwaddr tb, addr;
     uint32_t intstatus, status, buffer, sum = 0;
     int cr, nr, len, xmit_pos, csum_offset = 0, csum_stuff_offset = 0;
     uint16_t csum = 0;
@@ -572,8 +562,8 @@ static void sunhme_transmit(SunHMEState *s)
     nr = sunhme_get_tx_ring_count(s);
     cr = sunhme_get_tx_ring_nr(s);
 
-    pci_dma_read(d, tb + cr * HME_DESC_SIZE, &status, 4);
-    pci_dma_read(d, tb + cr * HME_DESC_SIZE + 4, &buffer, 4);
+    status = sunhme_ld(s, tb + cr * HME_DESC_SIZE);
+    buffer = sunhme_ld(s, tb + cr * HME_DESC_SIZE + 4);
 
     xmit_pos = 0;
     while (status & HME_XD_OWN) {
@@ -587,7 +577,7 @@ static void sunhme_transmit(SunHMEState *s)
             len = HME_FIFO_SIZE - xmit_pos;
         }
 
-        pci_dma_read(d, addr, &xmit_buffer[xmit_pos], len);
+        sunhme_dma_read(s, addr, &xmit_buffer[xmit_pos], len);
         xmit_pos += len;
 
         /* Detect start of packet for TX checksum */
@@ -627,7 +617,7 @@ static void sunhme_transmit(SunHMEState *s)
 
         /* Update status */
         status &= ~HME_XD_OWN;
-        pci_dma_write(d, tb + cr * HME_DESC_SIZE, &status, 4);
+        sunhme_st(s, tb + cr * HME_DESC_SIZE, status);
 
         /* Move onto next descriptor */
         cr++;
@@ -636,8 +626,8 @@ static void sunhme_transmit(SunHMEState *s)
         }
         sunhme_set_tx_ring_nr(s, cr);
 
-        pci_dma_read(d, tb + cr * HME_DESC_SIZE, &status, 4);
-        pci_dma_read(d, tb + cr * HME_DESC_SIZE + 4, &buffer, 4);
+        status = sunhme_ld(s, tb + cr * HME_DESC_SIZE);
+        buffer = sunhme_ld(s, tb + cr * HME_DESC_SIZE + 4);
 
         /* Indicate TX complete */
         intstatus = s->sebregs[HME_SEBI_STAT >> 2];
@@ -717,8 +707,7 @@ static ssize_t sunhme_receive(NetClientState *nc, const uint8_t *buf,
                               size_t size)
 {
     SunHMEState *s = qemu_get_nic_opaque(nc);
-    PCIDevice *d = PCI_DEVICE(s);
-    dma_addr_t rb, addr;
+    hwaddr rb, addr;
     uint32_t intstatus, status, buffer, buffersize, sum;
     uint16_t csum;
     int nr, cr, len, rxoffset, csum_offset;
@@ -775,8 +764,8 @@ static ssize_t sunhme_receive(NetClientState *nc, const uint8_t *buf,
     nr = sunhme_get_rx_ring_count(s);
     cr = sunhme_get_rx_ring_nr(s);
 
-    pci_dma_read(d, rb + cr * HME_DESC_SIZE, &status, 4);
-    pci_dma_read(d, rb + cr * HME_DESC_SIZE + 4, &buffer, 4);
+    status = sunhme_ld(s, rb + cr * HME_DESC_SIZE);
+    buffer = sunhme_ld(s, rb + cr * HME_DESC_SIZE + 4);
 
     /* If we don't own the current descriptor then indicate overflow error */
     if (!(status & HME_XD_OWN)) {
@@ -799,7 +788,7 @@ static ssize_t sunhme_receive(NetClientState *nc, const uint8_t *buf,
         len = buffersize;
     }
 
-    pci_dma_write(d, addr, buf, len);
+    sunhme_dma_write(s, addr, buf, len);
 
     trace_sunhme_rx_desc(buffer, rxoffset, status, len, cr, nr);
 
@@ -819,7 +808,7 @@ static ssize_t sunhme_receive(NetClientState *nc, const uint8_t *buf,
     status &= ~HME_XD_RXCKSUM;
     status |= csum;
 
-    pci_dma_write(d, rb + cr * HME_DESC_SIZE, &status, 4);
+    sunhme_st(s, rb + cr * HME_DESC_SIZE, status);
 
     cr++;
     if (cr >= nr) {
@@ -846,58 +835,51 @@ static NetClientInfo net_sunhme_info = {
     .link_status_changed = sunhme_link_status_changed,
 };
 
-static void sunhme_realize(PCIDevice *pci_dev, Error **errp)
+void sunhme_core_realize(SunHMEState *s, Object *owner, DeviceState *dev,
+                         AddressSpace *as, bool big_endian,
+                         void (*set_irq)(void *opaque, int level),
+                         void *irq_opaque)
 {
-    SunHMEState *s = SUNHME(pci_dev);
-    DeviceState *d = DEVICE(pci_dev);
-    uint8_t *pci_conf;
+    static const struct {
+        const char *name;
+        const MemoryRegionOps *ops;
+        hwaddr off;
+        uint64_t size;
+    } regs[] = {
+        { "sunhme.seb", &sunhme_seb_ops, 0x0, HME_SEB_REG_SIZE },
+        { "sunhme.etx", &sunhme_etx_ops, 0x2000, HME_ETX_REG_SIZE },
+        { "sunhme.erx", &sunhme_erx_ops, 0x4000, HME_ERX_REG_SIZE },
+        { "sunhme.mac", &sunhme_mac_ops, 0x6000, HME_MAC_REG_SIZE },
+        { "sunhme.mif", &sunhme_mif_ops, 0x7000, HME_MIF_REG_SIZE },
+    };
+    MemoryRegion *mrs[] = { &s->sebreg, &s->etxreg, &s->erxreg, &s->macreg,
+                            &s->mifreg };
+    int i;
 
-    pci_conf = pci_dev->config;
-    pci_conf[PCI_INTERRUPT_PIN] = 1;    /* interrupt pin A */
+    s->as = as;
+    s->big_endian = big_endian;
+    s->set_irq = set_irq;
+    s->irq_opaque = irq_opaque;
 
-    memory_region_init(&s->hme, OBJECT(pci_dev), "sunhme", HME_REG_SIZE);
-    pci_register_bar(pci_dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->hme);
-
-    memory_region_init_io(&s->sebreg, OBJECT(pci_dev), &sunhme_seb_ops, s,
-                          "sunhme.seb", HME_SEB_REG_SIZE);
-    memory_region_add_subregion(&s->hme, 0, &s->sebreg);
-
-    memory_region_init_io(&s->etxreg, OBJECT(pci_dev), &sunhme_etx_ops, s,
-                          "sunhme.etx", HME_ETX_REG_SIZE);
-    memory_region_add_subregion(&s->hme, 0x2000, &s->etxreg);
-
-    memory_region_init_io(&s->erxreg, OBJECT(pci_dev), &sunhme_erx_ops, s,
-                          "sunhme.erx", HME_ERX_REG_SIZE);
-    memory_region_add_subregion(&s->hme, 0x4000, &s->erxreg);
-
-    memory_region_init_io(&s->macreg, OBJECT(pci_dev), &sunhme_mac_ops, s,
-                          "sunhme.mac", HME_MAC_REG_SIZE);
-    memory_region_add_subregion(&s->hme, 0x6000, &s->macreg);
-
-    memory_region_init_io(&s->mifreg, OBJECT(pci_dev), &sunhme_mif_ops, s,
-                          "sunhme.mif", HME_MIF_REG_SIZE);
-    memory_region_add_subregion(&s->hme, 0x7000, &s->mifreg);
+    memory_region_init(&s->hme, owner, "sunhme", HME_REG_SIZE);
+    for (i = 0; i < ARRAY_SIZE(regs); i++) {
+        s->ops[i] = *regs[i].ops;
+        s->ops[i].endianness = big_endian ? DEVICE_BIG_ENDIAN
+                                          : DEVICE_LITTLE_ENDIAN;
+        memory_region_init_io(mrs[i], owner, &s->ops[i], s, regs[i].name,
+                              regs[i].size);
+        memory_region_add_subregion(&s->hme, regs[i].off, mrs[i]);
+    }
 
     qemu_macaddr_default_if_unset(&s->conf.macaddr);
     s->nic = qemu_new_nic(&net_sunhme_info, &s->conf,
-                          object_get_typename(OBJECT(d)), d->id,
-                          &d->mem_reentrancy_guard, s);
+                          object_get_typename(owner), dev->id,
+                          &dev->mem_reentrancy_guard, s);
     qemu_format_nic_info_str(qemu_get_queue(s->nic), s->conf.macaddr.a);
 }
 
-static void sunhme_instance_init(Object *obj)
+void sunhme_core_reset(SunHMEState *s)
 {
-    SunHMEState *s = SUNHME(obj);
-
-    device_add_bootindex_property(obj, &s->conf.bootindex,
-                                  "bootindex", "/ethernet-phy@0",
-                                  DEVICE(obj));
-}
-
-static void sunhme_reset(DeviceState *ds)
-{
-    SunHMEState *s = SUNHME(ds);
-
     /* Configure internal transceiver */
     s->mifregs[HME_MIFI_CFG >> 2] |= HME_MIF_CFG_MDI0;
 
@@ -919,54 +901,3 @@ static void sunhme_reset(DeviceState *ds)
     s->mifregs[HME_MIFI_IMASK >> 2] = 0xffff;
     s->sebregs[HME_SEBI_IMASK >> 2] = 0xff7fffff;
 }
-
-static const VMStateDescription vmstate_hme = {
-    .name = "sunhme",
-    .version_id = 0,
-    .minimum_version_id = 0,
-    .fields = (const VMStateField[]) {
-        VMSTATE_PCI_DEVICE(parent_obj, SunHMEState),
-        VMSTATE_MACADDR(conf.macaddr, SunHMEState),
-        VMSTATE_UINT32_ARRAY(sebregs, SunHMEState, (HME_SEB_REG_SIZE >> 2)),
-        VMSTATE_UINT32_ARRAY(etxregs, SunHMEState, (HME_ETX_REG_SIZE >> 2)),
-        VMSTATE_UINT32_ARRAY(erxregs, SunHMEState, (HME_ERX_REG_SIZE >> 2)),
-        VMSTATE_UINT32_ARRAY(macregs, SunHMEState, (HME_MAC_REG_SIZE >> 2)),
-        VMSTATE_UINT32_ARRAY(mifregs, SunHMEState, (HME_MIF_REG_SIZE >> 2)),
-        VMSTATE_UINT16_ARRAY(miiregs, SunHMEState, HME_MII_REGS_SIZE),
-        VMSTATE_END_OF_LIST()
-    }
-};
-
-static void sunhme_class_init(ObjectClass *klass, const void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
-
-    k->realize = sunhme_realize;
-    k->vendor_id = PCI_VENDOR_ID_SUN;
-    k->device_id = PCI_DEVICE_ID_SUN_HME;
-    k->class_id = PCI_CLASS_NETWORK_ETHERNET;
-    dc->vmsd = &vmstate_hme;
-    device_class_set_legacy_reset(dc, sunhme_reset);
-    device_class_set_props(dc, sunhme_properties);
-    set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
-}
-
-static const TypeInfo sunhme_info = {
-    .name          = TYPE_SUNHME,
-    .parent        = TYPE_PCI_DEVICE,
-    .class_init    = sunhme_class_init,
-    .instance_size = sizeof(SunHMEState),
-    .instance_init = sunhme_instance_init,
-    .interfaces = (const InterfaceInfo[]) {
-        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
-        { }
-    }
-};
-
-static void sunhme_register_types(void)
-{
-    type_register_static(&sunhme_info);
-}
-
-type_init(sunhme_register_types)

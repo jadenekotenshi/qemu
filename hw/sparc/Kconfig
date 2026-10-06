@@ -6,6 +6,7 @@ config SUN4M
     imply CG3
     select CS4231
     select SUN_DBRI
+    select SUNHME_SBUS
     select ECCMEMCTL
     select EMPTY_SLOT
     select UNIMP
