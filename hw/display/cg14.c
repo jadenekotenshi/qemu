@@ -46,6 +46,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(CG14State, SUN_CG14)
 #define CG14_DAC_GAMMA     0x2100
 #define CG14_VCA           0x20c /* VBC configuration */
 #define  CG14_VCA_8MB      0x2000
+#define  CG14_VCA_VERS(v)  ((v) << 10) /* VBC version */
 #define CG14_CLUT1         0x4000
 #define CG14_CLUT2         0x5000
 #define CG14_CLUT_SIZE     0x1000
@@ -431,7 +432,12 @@ static void cg14_reset(DeviceState *dev)
     s->regs[CG14_RSR] = 0x10; /* revision 1, three CLUTs */
     s->regs[0x04] = s->msr; /* master status */
     s->regs[0x0c] = 0x04;     /* monitor data register */
-    stl_be_p(&s->regs[CG14_VCA], s->vram_size >= 8 * MiB ? CG14_VCA_8MB : 0);
+    /*
+     * VBC version 1: Solaris waits for a retrace handshake on version 0
+     * that nothing in its interrupt handler ever completes.
+     */
+    stl_be_p(&s->regs[CG14_VCA], CG14_VCA_VERS(1) |
+             (s->vram_size >= 8 * MiB ? CG14_VCA_8MB : 0));
     cg14_dirty_all(s);
 }
 
@@ -439,6 +445,8 @@ static void cg14_reset(DeviceState *dev)
  * The ROM picks the video mode from the monitor sense lines in the master
  * status register (MSR bits 3:1).  A 4 MB board drives a 1152x900 monitor
  * and an 8 MB one a 1280x1024 monitor, unless asked for something else.
+ * Later 8 MB boards also drive 1920x1080 (that mode only fits in 8 MB at
+ * 8 or 16 bits per pixel).
  */
 static const struct {
     uint16_t width, height;
@@ -448,6 +456,7 @@ static const struct {
     { 1600, 1280, 2 },
     { 1280, 1024, 4 },
     { 1152, 900, 6 },
+    { 1920, 1080, 14 },
 };
 
 static void cg14_realize(DeviceState *dev, Error **errp)
@@ -470,7 +479,7 @@ static void cg14_realize(DeviceState *dev, Error **errp)
         }
         if (i == ARRAY_SIZE(cg14_modes)) {
             error_setg(errp, "sun-cg14: unsupported resolution %ux%u "
-                       "(try 1024x768, 1152x900, 1280x1024 or 1600x1280)",
+                       "(try 1024x768, 1152x900, 1280x1024, 1600x1280 or 1920x1080)",
                        s->width, s->height);
             return;
         }

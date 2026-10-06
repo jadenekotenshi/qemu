@@ -694,6 +694,31 @@ static uint64_t translate_prom_address(void *opaque, uint64_t addr)
     return addr + *base_addr - PROM_VADDR;
 }
 
+/*
+ * The SS-20 PROM (2.25) carries a 1920x1080x72 monitor description but only
+ * ever reads three monitor sense bits, so nothing selects it: its mode
+ * table is keyed on 4 bit codes and that entry sits at 11. Make sense code 7
+ * choose it instead by swapping the two selectors, if this is that PROM.
+ */
+static void sun4m_prom_select_1080(hwaddr prom_addr)
+{
+    static const uint8_t sel11[] = { 0x10, 0, 0, 0, 0x0b, 0x1c, 0, 0x0f,
+                                     0x08, 0x29 };
+    static const uint8_t sel7[] = { 0x10, 0, 0, 0, 0x07, 0x1c, 0, 0x07,
+                                    0x08, 0x23 };
+    uint8_t *a = rom_ptr(prom_addr + 0x2eca1, sizeof(sel11));
+    uint8_t *b = rom_ptr(prom_addr + 0x2ecdd, sizeof(sel7));
+
+    if (!a || !b || memcmp(a, sel11, sizeof(sel11)) ||
+        memcmp(b, sel7, sizeof(sel7))) {
+        warn_report("1920x1080 needs the SS-20 2.25 PROM; "
+                    "the PROM will pick another mode");
+        return;
+    }
+    a[4] = 0x07;
+    b[4] = 0x0b;
+}
+
 static void prom_init(hwaddr addr, const char *bios_name)
 {
     DeviceState *dev;
@@ -1081,6 +1106,9 @@ static void sun4m_hw_init(MachineState *machine)
                                                      &error_abort);
             graphic_height = object_property_get_uint(OBJECT(cg14), "height",
                                                       &error_abort);
+            if (graphic_width == 1920 && graphic_height == 1080) {
+                sun4m_prom_select_1080(hwdef->slavio_base);
+            }
             sysbus_mmio_map(SYS_BUS_DEVICE(cg14), 0,
                             hwdef->vsimm[0].reg_base);
             sysbus_mmio_map(SYS_BUS_DEVICE(cg14), 1,
