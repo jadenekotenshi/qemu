@@ -364,14 +364,6 @@ static void cg14_draw_32(CG14State *s, uint8_t *d, const uint8_t *v)
         const uint8_t *px = &v[4 * x];     /* X B G R */
         uint8_t xl = s->regs[CG14_XLUT + px[0]];
 
-        /*
-         * Solaris keeps an 8 bit visual in the B byte and selects CLUT1
-         * through the packed pixel register (like the hardware does in
-         * 8 bit mode), whatever its XLUT says.
-         */
-        if ((s->regs[CG14_PPR] & 0xf0) == 0x40) {
-            xl = 0x40;
-        }
         unsigned r = px[3], g = px[2], b = px[1];
 
         if (xl) {

@@ -78,6 +78,7 @@ static void sx_setreg(SunSXState *s, unsigned n, uint32_t v)
 
 #define SXM_OP_MASK         0x1
 #define SXM_OP_CLAMP        0x2
+#define SXM_OP_COND         0x4
 #define SXM_OP_SELECT       0x8
 #define SXM_OP_LOAD         0xa
 
@@ -124,6 +125,7 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
     bool select = (op & SXM_OP_SELECT) && !load;
     bool clamp = (op & SXM_OP_CLAMP) && !load;
     bool planemask = (op & SXM_OP_MASK) && !load;
+    bool cond = (op & SXM_OP_COND) && !(op & SXM_OP_SELECT) && !load;
     unsigned shift = 8 * (type & 3);
     uint32_t pm = s->regs[SX_PLANEMASK / 4];
 
@@ -141,11 +143,18 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
                 sx_setreg(s, reg + i, v << shift);
             } else if (select) {
                 uint32_t src = *sx_reg(s, reg + sx_mask_bit(s, i));
+                uint8_t v = (src >> shift) & 0xff;
 
-                sx_wr8(a + i, (src >> shift) & 0xff);
+                if (planemask) {
+                    v = (sx_rd8(a + i) & ~pm) | (v & pm);
+                }
+                sx_wr8(a + i, v);
             } else {
                 uint8_t v = sx_store_byte(*sx_reg(s, reg + i), shift, clamp);
 
+                if (cond && !(i < 32 && sx_mask_bit(s, i))) {
+                    continue;
+                }
                 if (planemask) {
                     v = (sx_rd8(a + i) & ~pm) | (v & pm);
                 }
@@ -168,11 +177,19 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
                     sx_setreg(s, rn, v << shift);
                 } else if (select) {
                     uint32_t src = *sx_reg(s, reg + sx_mask_bit(s, 4 * i + k));
+                    uint8_t v = (src >> shift) & 0xff;
 
-                    sx_wr8(ba, (src >> shift) & 0xff);
+                    if (planemask) {
+                        v = (sx_rd8(ba) & ~pm) | (v & pm);
+                    }
+                    sx_wr8(ba, v);
                 } else {
                     uint8_t v = sx_store_byte(*sx_reg(s, rn), shift, clamp);
 
+                    if (cond && !(4 * i + k < 32 &&
+                                  sx_mask_bit(s, 4 * i + k))) {
+                        continue;
+                    }
                     if (planemask) {
                         v = (sx_rd8(ba) & ~pm) | (v & pm);
                     }
@@ -214,8 +231,22 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
                 /* word j: byte k comes from the register the mask bit picks */
                 for (k = 0; k < 4; k++) {
                     uint32_t src = *sx_reg(s, reg + sx_mask_bit(s, 4 * i + k));
+                    uint8_t v = (src >> (24 - 8 * k)) & 0xff;
 
-                    sx_wr8(wa + k, (src >> (24 - 8 * k)) & 0xff);
+                    if (planemask) {
+                        v = (sx_rd8(wa + k) & ~(pm >> (24 - 8 * k))) |
+                            (v & (pm >> (24 - 8 * k)));
+                    }
+                    sx_wr8(wa + k, v);
+                }
+            } else if (cond) {
+                /* only the bytes whose mask bit is set */
+                uint32_t v = *sx_reg(s, reg + i);
+
+                for (k = 0; k < 4; k++) {
+                    if (4 * i + k < 32 && sx_mask_bit(s, 4 * i + k)) {
+                        sx_wr8(wa + k, (v >> (24 - 8 * k)) & 0xff);
+                    }
                 }
             } else {
                 uint32_t v = *sx_reg(s, reg + i);
@@ -288,11 +319,123 @@ static void sx_rop_insn(SunSXState *s, uint32_t insn)
     }
 }
 
+/* arithmetic, logic, shift and gather/scatter groups */
+static int32_t sx_simm7(unsigned v)
+{
+    return (int32_t)(v << 25) >> 25;
+}
+
+static void sx_vec_insn(SunSXState *s, uint32_t insn)
+{
+    unsigned grp = insn >> 28;
+    unsigned cnt = ((insn >> 24) & 0xf) + 1;
+    unsigned mode = (insn >> 21) & 7;
+    unsigned sa = (insn >> 14) & 0x7f;
+    unsigned d = (insn >> 7) & 0x7f;
+    unsigned sb = insn & 0x7f;
+    uint32_t imm = sx_simm7(sb);
+    unsigned i;
+
+    trace_sun_sx_alu(insn);
+
+    for (i = 0; i < cnt; i++) {
+        uint32_t a = *sx_reg(s, sa + i);
+        uint32_t bv = *sx_reg(s, sb + i);
+        uint32_t bs = *sx_reg(s, sb);
+        uint32_t r;
+
+        switch (grp) {
+        case 0xa:
+            switch (mode) {
+            case 0: r = a + bv; break;
+            case 1: r = a + bs; break;
+            case 2: r = a + imm; break;
+            case 4: r = a - bv; break;
+            case 5: r = a - bs; break;
+            case 6: r = a - imm; break;
+            case 7: r = (int32_t)bv < 0 ? -bv : bv; break;
+            default:
+                qemu_log_mask(LOG_UNIMP, "sun-sx: unimplemented arithmetic "
+                              "0x%08x\n", insn);
+                return;
+            }
+            break;
+        case 0xb:
+            switch (mode) {
+            case 0: r = a & bv; break;
+            case 1: r = a & bs; break;
+            case 2: r = a & imm; break;
+            case 3: r = a ^ bv; break;
+            case 4: r = a ^ bs; break;
+            case 5: r = a ^ imm; break;
+            case 6: r = a | bv; break;
+            default: r = a | bs; break;
+            }
+            break;
+        case 0xc: {
+            unsigned n;
+
+            switch (mode) {
+            case 0: n = bv & 31; r = a >> n; break;
+            case 1: n = sb & 31; r = a >> n; break;
+            case 2: n = bv & 31; r = (int32_t)a >> n; break;
+            case 3: n = sb & 31; r = (int32_t)a >> n; break;
+            case 4: n = bv & 31; r = a << n; break;
+            case 5: n = sb & 31; r = a << n; break;
+            default: {
+                /* funnel: the top word of (a:next) << n */
+                uint64_t w = ((uint64_t)a << 32) | *sx_reg(s, sa + i + 1);
+
+                n = (mode == 6 ? bs : sb) & 31;
+                r = (w << n) >> 32;
+                break;
+            }
+            }
+            break;
+        }
+        default:
+            qemu_log_mask(LOG_UNIMP, "sun-sx: unimplemented instruction "
+                          "0x%08x\n", insn);
+            return;
+        }
+        sx_setreg(s, d + i, r);
+    }
+}
+
+static void sx_gather_insn(SunSXState *s, uint32_t insn)
+{
+    unsigned cnt = ((insn >> 24) & 0xf) + 1;
+    unsigned mode = (insn >> 21) & 7;
+    unsigned sa = (insn >> 14) & 0x7f;
+    unsigned d = (insn >> 7) & 0x7f;
+    unsigned sp = insn & 0x7f;
+    unsigned i;
+
+    trace_sun_sx_alu(insn);
+    for (i = 0; i < cnt; i++) {
+        if (mode == 3) { /* gather: spaced sources, packed result */
+            sx_setreg(s, d + i, *sx_reg(s, sa + i * sp));
+        } else if (mode == 2) { /* scatter */
+            sx_setreg(s, d + i * sp, *sx_reg(s, sa + i));
+        } else {
+            qemu_log_mask(LOG_UNIMP, "sun-sx: unimplemented misc "
+                          "0x%08x\n", insn);
+            return;
+        }
+    }
+}
+
 static void sx_alu_insn(SunSXState *s, uint32_t insn)
 {
     switch (insn >> 28) {
     case 0x9:
         sx_rop_insn(s, insn);
+        break;
+    case 0xa ... 0xc:
+        sx_vec_insn(s, insn);
+        break;
+    case 0xe:
+        sx_gather_insn(s, insn);
         break;
     default:
         qemu_log_mask(LOG_UNIMP, "sun-sx: unimplemented instruction "
