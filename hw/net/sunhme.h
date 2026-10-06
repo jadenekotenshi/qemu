@@ -67,6 +67,12 @@ typedef struct SunHMEState {
     uint32_t mifregs[HME_MIF_REG_SIZE >> 2];
 
     uint16_t miiregs[HME_MII_REGS_SIZE];
+
+    /* bit banged MII state, see sunhme_bb_clock_rise() */
+    int bb_state, bb_cnt;
+    uint32_t bb_acc;
+    uint16_t bb_out;
+    uint8_t bb_op, bb_phy, bb_reg;
 } SunHMEState;
 
 void sunhme_core_realize(SunHMEState *s, Object *owner, DeviceState *dev,

@@ -358,6 +358,7 @@ sungem_mmio_pcs_write(uint64_t addr, uint64_t val) "MMIO pcs write to 0x%"PRIx64
 sungem_mmio_pcs_read(uint64_t addr, uint64_t val) "MMIO pcs read from 0x%"PRIx64" val=0x%"PRIx64
 
 # sunhme.c
+sunhme_bb_frame(int op, int phy, int reg) "op %d phy %d reg %d"
 sunhme_seb_write(uint64_t addr, uint64_t value) "addr 0x%"PRIx64" value 0x%"PRIx64
 sunhme_seb_read(uint64_t addr, uint64_t value) "addr 0x%"PRIx64" value 0x%"PRIx64
 sunhme_etx_write(uint64_t addr, uint64_t value) "addr 0x%"PRIx64" value 0x%"PRIx64

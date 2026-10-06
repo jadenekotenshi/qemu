@@ -93,6 +93,9 @@
 #define HME_MACI_HASHTAB0              0x34c
 
 
+#define HME_MIFI_BBCLK                 0x0
+#define HME_MIFI_BBDATA                0x4
+#define HME_MIFI_BBOENAB               0x8
 #define HME_MIFI_FO                    0xc
 #define HME_MIF_FO_ST                  0xc0000000
 #define HME_MIF_FO_ST_SHIFT            30
@@ -443,6 +446,103 @@ static uint16_t sunhme_mii_read(SunHMEState *s, uint8_t reg)
     return data;
 }
 
+/*
+ * Bit banged MII (the Solaris driver uses it to probe the PHYs): the host
+ * clocks bits out through BBDATA/BBCLK while BBOENAB is set, and while it is
+ * clear the PHY answers on the MDI bits of the CFG register. Frames are
+ * <preamble> 01 OP(2) PHYAD(5) REGAD(5) TA(2) DATA(16).
+ */
+enum { BB_IDLE, BB_SAW0, BB_HDR, BB_RDTA, BB_RDDATA, BB_WRTA, BB_WRDATA };
+
+static void sunhme_bb_drive(SunHMEState *s, bool internal, unsigned bit)
+{
+    uint32_t cfg = s->mifregs[HME_MIFI_CFG >> 2];
+    uint32_t mask = internal ? HME_MIF_CFG_MDI0 : HME_MIF_CFG_MDI1;
+
+    cfg = bit ? (cfg | mask) : (cfg & ~mask);
+    s->mifregs[HME_MIFI_CFG >> 2] = cfg;
+}
+
+static void sunhme_bb_clock_rise(SunHMEState *s)
+{
+    bool oe = s->mifregs[HME_MIFI_BBOENAB >> 2] & 1;
+    unsigned bit = s->mifregs[HME_MIFI_BBDATA >> 2] & 1;
+
+    switch (s->bb_state) {
+    case BB_IDLE:
+    case BB_SAW0:
+        if (!oe) {
+            break;
+        }
+        if (bit) {
+            s->bb_state = s->bb_state == BB_SAW0 ? BB_HDR : BB_IDLE;
+            s->bb_cnt = 0;
+            s->bb_acc = 0;
+        } else {
+            s->bb_state = BB_SAW0;
+        }
+        break;
+    case BB_HDR:
+        s->bb_acc = (s->bb_acc << 1) | bit;
+        if (++s->bb_cnt == 12) {
+            s->bb_op = s->bb_acc >> 10;
+            s->bb_phy = (s->bb_acc >> 5) & 0x1f;
+            s->bb_reg = s->bb_acc & 0x1f;
+            trace_sunhme_bb_frame(s->bb_op, s->bb_phy, s->bb_reg);
+            s->bb_cnt = 0;
+            s->bb_acc = 0;
+            if (s->bb_op == 2) {
+                s->bb_state = BB_RDTA;
+            } else if (s->bb_op == 1) {
+                s->bb_state = BB_WRTA;
+            } else {
+                s->bb_state = BB_IDLE;
+            }
+        }
+        break;
+    case BB_RDTA:
+        /*
+         * Hosts sample the line while the clock is low, i.e. what the PHY
+         * did after the previous rising edge. The second turnaround bit
+         * (the one drivers check) must read as zero, so the PHY starts
+         * driving at the first edge after the header.
+         */
+        s->bb_cnt = 0;
+        s->bb_out = s->bb_phy == HME_PHYAD_INTERNAL ?
+                    sunhme_mii_read(s, s->bb_reg) : 0;
+        s->bb_state = BB_RDDATA;
+        sunhme_bb_drive(s, true, 0);
+        break;
+    case BB_RDDATA:
+        sunhme_bb_drive(s, true, (s->bb_out >> 15) & 1);
+        s->bb_out <<= 1;
+        if (++s->bb_cnt == 16) {
+            s->bb_state = BB_IDLE;
+        }
+        break;
+    case BB_WRTA:
+        if (++s->bb_cnt == 2) {
+            s->bb_cnt = 0;
+            s->bb_state = BB_WRDATA;
+        }
+        break;
+    case BB_WRDATA:
+        s->bb_acc = (s->bb_acc << 1) | bit;
+        if (++s->bb_cnt == 16) {
+            if (s->bb_phy == HME_PHYAD_INTERNAL) {
+                sunhme_mii_write(s, s->bb_reg, s->bb_acc);
+            }
+            s->bb_state = BB_IDLE;
+        }
+        break;
+    }
+    if (s->bb_state == BB_IDLE || s->bb_state == BB_SAW0) {
+        /* only the internal PHY exists: its line idles high, the external
+         * one reads as absent */
+        sunhme_bb_drive(s, true, 1);
+    }
+}
+
 static void sunhme_mif_write(void *opaque, hwaddr addr,
                           uint64_t val, unsigned size)
 {
@@ -453,6 +553,13 @@ static void sunhme_mif_write(void *opaque, hwaddr addr,
     trace_sunhme_mif_write(addr, val);
 
     switch (addr) {
+    case HME_MIFI_BBCLK:
+        if ((val & 1) && !(s->mifregs[HME_MIFI_BBCLK >> 2] & 1)) {
+            s->mifregs[addr >> 2] = val;
+            sunhme_bb_clock_rise(s);
+            return;
+        }
+        break;
     case HME_MIFI_CFG:
         /* Mask the read-only bits */
         val &= ~(HME_MIF_CFG_MDI0 | HME_MIF_CFG_MDI1);
@@ -882,6 +989,7 @@ void sunhme_core_reset(SunHMEState *s)
 {
     /* Configure internal transceiver */
     s->mifregs[HME_MIFI_CFG >> 2] |= HME_MIF_CFG_MDI0;
+    s->bb_state = 0;
 
     /* Advertise auto, 100Mbps FD */
     s->miiregs[MII_ANAR] = MII_ANAR_TXFD;
