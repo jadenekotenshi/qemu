@@ -47,6 +47,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(CG14State, SUN_CG14)
 #define CG14_VCA           0x20c /* VBC configuration */
 #define  CG14_VCA_8MB      0x2000
 #define  CG14_VCA_VERS(v)  ((v) << 10) /* VBC version */
+#define CG14_XLUT          0x3000
 #define CG14_CLUT1         0x4000
 #define CG14_CLUT2         0x5000
 #define CG14_CLUT_SIZE     0x1000
@@ -306,14 +307,49 @@ static void cg14_draw_16(CG14State *s, uint8_t *d, const uint8_t *v)
     }
 }
 
+/*
+ * 32 bit pixels are X B G R, where X selects an XLUT entry. The entry says
+ * where the colour comes from: bits 7:6 pick the "left" source (0 = the
+ * pixel's own RGB, 1..3 = CLUT1..3 indexed by the channel in bits 3:2) and
+ * bits 5:4 an optional "right" source (CLUT 1..3, channel in bits 1:0, X
+ * being 0). The two are blended with the right CLUT entry's upper byte
+ * as the alpha, 0x80 being 1.0 (that is how the 16 bit palette is built).
+ * Solaris' 8 bit visual stores the palette index in B and XLUT 0x40.
+ */
 static void cg14_draw_32(CG14State *s, uint8_t *d, const uint8_t *v)
 {
     uint32_t *p = (uint32_t *)d;
     int x;
 
     for (x = 0; x < s->width; x++) {
-        /* X B G R */
-        p[x] = cg14_out(s, v[4 * x + 3], v[4 * x + 2], v[4 * x + 1]);
+        const uint8_t *px = &v[4 * x];     /* X B G R */
+        uint8_t xl = s->regs[CG14_XLUT + px[0]];
+        unsigned r = px[3], g = px[2], b = px[1];
+
+        if (xl) {
+            unsigned lsrc = xl >> 6, rsrc = (xl >> 4) & 3;
+            unsigned lc = (xl >> 2) & 3, rc = xl & 3;
+
+            if (lsrc) {
+                unsigned idx = lc == 3 ? px[3] : lc == 2 ? px[2] : px[1];
+                const uint8_t *e = &s->regs[CG14_CLUT1 +
+                    (lsrc - 1) * CG14_CLUT_SIZE + idx * 4];
+
+                r = e[3]; g = e[2]; b = e[1];
+            }
+            if (rsrc) {
+                unsigned idx = rc == 3 ? px[3] : rc == 2 ? px[2] :
+                               rc == 1 ? px[1] : px[0];
+                const uint8_t *e = &s->regs[CG14_CLUT1 +
+                    (rsrc - 1) * CG14_CLUT_SIZE + idx * 4];
+                unsigned a = MIN(e[0], 0x80);
+
+                r = (r * (0x80 - a) + e[3] * a) / 0x80;
+                g = (g * (0x80 - a) + e[2] * a) / 0x80;
+                b = (b * (0x80 - a) + e[1] * a) / 0x80;
+            }
+        }
+        p[x] = cg14_out(s, r, g, b);
     }
 }
 

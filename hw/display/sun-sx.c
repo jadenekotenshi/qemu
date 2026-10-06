@@ -36,7 +36,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(SunSXState, SUN_SX)
 
 #define SX_REG_SIZE          0x2000
 #define SX_NREGS             128
-#define SX_WINDOW_SIZE       0x01000000   /* video RAM window */
+#define SX_WINDOW_SIZE       0x100000000ULL /* all of 32 bit physical space */
 
 #define SX_CONTROL_STATUS    0x00
 #define  SX_MT               0x00004000   /* instruction queue is empty */
@@ -312,8 +312,12 @@ static void sx_window_write(void *opaque, hwaddr addr, uint64_t val,
                             unsigned size)
 {
     SunSXState *s = opaque;
-    /* the offset into the window is the offset into the video RAM */
-    hwaddr pa = 0xfc000000ULL + addr;
+    /*
+     * the offset into the window is the physical address the instruction
+     * works on: video RAM, but also main memory (Solaris' X server keeps
+     * pixmaps there and fills them with the SX)
+     */
+    hwaddr pa = addr;
 
     if (size == 4 && (val & 0x80000000) && !(val & 0x70000000)) {
         sx_mem_insn(s, pa, val);

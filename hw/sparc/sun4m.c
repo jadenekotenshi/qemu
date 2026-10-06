@@ -1124,9 +1124,8 @@ static void sun4m_hw_init(MachineState *machine)
 
                 sysbus_realize_and_unref(SYS_BUS_DEVICE(sx), &error_fatal);
                 sysbus_mmio_map(SYS_BUS_DEVICE(sx), 0, hwdef->sx_base);
-                /* memory instructions: writes to 0x8_0000_0000 + VRAM PA */
-                sysbus_mmio_map(SYS_BUS_DEVICE(sx), 1,
-                                0x800000000ULL | hwdef->vsimm[0].vram_base);
+                /* memory instructions: writes to 0x8_0000_0000 + target PA */
+                sysbus_mmio_map(SYS_BUS_DEVICE(sx), 1, 0x800000000ULL);
             }
             vga_interface_created = true;
         } else if (vga_interface_type == VGA_CG3) {
