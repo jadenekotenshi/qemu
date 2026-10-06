@@ -1308,6 +1308,12 @@ static void sun4m_hw_init(MachineState *machine)
         sysbus_connect_irq(dbrisbd, 0, qdev_get_gpio_in(sbus5_orgate, 1));
     }
 
+    /* -nic ...,model=sun-hme-sbus (or hme): an HME in the default slot */
+    dev = qemu_create_nic_device("sun-hme-sbus", false, "hme");
+    if (dev) {
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+    }
+
     if (hwdef->bpp_base) {
         /* parallel port */
         sysbus_create_simple("sun-bpp", hwdef->bpp_base, NULL);
