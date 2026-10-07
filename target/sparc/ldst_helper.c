@@ -2014,6 +2014,9 @@ void sparc_cpu_do_transaction_failed(CPUState *cs, hwaddr physaddr,
     bool is_exec = access_type == MMU_INST_FETCH;
     bool is_asi = false;
 
+    qemu_log_mask(LOG_GUEST_ERROR, "sparc: bus error, %s %u byte(s) at physical "
+                  "0x%" HWADDR_PRIx "\n", is_write ? "write" : "read", size,
+                  physaddr);
     sparc_raise_mmu_fault(cs, physaddr, is_write, is_exec,
                           is_asi, size, retaddr);
 }
