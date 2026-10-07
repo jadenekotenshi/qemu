@@ -148,6 +148,18 @@ static void pic_set_irq(void *opaque, int irq, int level)
             s->last_irr |= mask;
         } else {
             s->last_irr &= ~mask;
+            /*
+             * The master's IRQ2 is the slave's INT output. Drop the
+             * latched request when the slave withdraws it (typically by
+             * masking its last pending interrupt) before the CPU
+             * acknowledged it; keeping it makes the CPU take a spurious
+             * IRQ15 that guests such as OPENSTEP do not EOI on the
+             * master, which then blocks every slave interrupt (mouse,
+             * ...) for good.
+             */
+            if (s->master && irq == 2) {
+                s->irr &= ~mask;
+            }
         }
     }
     pic_update_irq(s);
