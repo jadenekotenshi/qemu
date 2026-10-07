@@ -263,6 +263,9 @@ static void kbd_throttle_timeout(void *opaque)
 {
     KBDState *s = opaque;
 
+    if (s->mouse_throttle) {
+        ps2_mouse_flush(&s->ps2mouse);
+    }
     if (kbd_pending(s)) {
         kbd_update_irq(s);
     }
@@ -410,6 +413,18 @@ static uint64_t kbd_read_data(void *opaque, hwaddr addr,
             }
             s->obdata = ps2_read_data(PS2_DEVICE(&s->ps2kbd));
         } else if (s->obsrc & KBD_OBSRC_MOUSE) {
+            /*
+             * A real mouse needs about a millisecond per byte on the serial
+             * line. Do not make the next byte (and its IRQ12) available the
+             * instant this one is read: guests whose mouse interrupt
+             * handler is not re-entrant (OPENSTEP's) take the next
+             * interrupt in the middle of the previous one and lose their
+             * place in the packet for good.
+             */
+            if (s->throttle_timer && s->mouse_throttle) {
+                timer_mod(s->throttle_timer,
+                          qemu_clock_get_us(QEMU_CLOCK_VIRTUAL) + 1000);
+            }
             s->obdata = ps2_read_data(PS2_DEVICE(&s->ps2mouse));
         } else if (s->obsrc & KBD_OBSRC_CTRL) {
             s->obdata = kbd_dequeue(s);
@@ -894,12 +909,14 @@ static void i8042_realizefn(DeviceState *dev, Error **errp)
                           qdev_get_gpio_in_named(dev, "ps2-mouse-input-irq",
                                                  0));
 
-    if (isa_s->kbd_throttle && !isa_s->kbd.extended_state) {
-        warn_report(TYPE_I8042 ": can't enable kbd-throttle without"
-                    " extended-state, disabling kbd-throttle");
-    } else if (isa_s->kbd_throttle) {
+    if ((isa_s->kbd_throttle || isa_s->mouse_throttle) &&
+        !isa_s->kbd.extended_state) {
+        warn_report(TYPE_I8042 ": can't enable kbd-throttle/mouse-throttle"
+                    " without extended-state, disabling them");
+    } else if (isa_s->kbd_throttle || isa_s->mouse_throttle) {
         s->throttle_timer = timer_new_us(QEMU_CLOCK_VIRTUAL,
                                          kbd_throttle_timeout, s);
+        s->mouse_throttle = isa_s->mouse_throttle;
     }
 }
 
@@ -935,6 +952,7 @@ static void i8042_build_aml(AcpiDevAmlIf *adev, Aml *scope)
 static const Property i8042_properties[] = {
     DEFINE_PROP_BOOL("extended-state", ISAKBDState, kbd.extended_state, true),
     DEFINE_PROP_BOOL("kbd-throttle", ISAKBDState, kbd_throttle, false),
+    DEFINE_PROP_BOOL("mouse-throttle", ISAKBDState, mouse_throttle, true),
     DEFINE_PROP_UINT8("kbd-irq", ISAKBDState, kbd_irq, 1),
     DEFINE_PROP_UINT8("mouse-irq", ISAKBDState, mouse_irq, 12),
 };

@@ -866,6 +866,15 @@ static void ps2_mouse_sync(DeviceState *dev)
     }
 }
 
+/* send any motion that piled up while the queue was full */
+void ps2_mouse_flush(PS2MouseState *s)
+{
+    /* ps2_mouse_sync() sends a packet even without motion: only on demand */
+    if (s->mouse_dx || s->mouse_dy || s->mouse_dz || s->mouse_dw) {
+        ps2_mouse_sync(DEVICE(s));
+    }
+}
+
 void ps2_mouse_fake_event(PS2MouseState *s)
 {
     trace_ps2_mouse_fake_event(s);

@@ -110,6 +110,7 @@ void ps2_queue_3(PS2State *s, int b1, int b2, int b3);
 void ps2_queue_4(PS2State *s, int b1, int b2, int b3, int b4);
 void ps2_keyboard_set_translation(PS2KbdState *s, int mode);
 void ps2_mouse_fake_event(PS2MouseState *s);
+void ps2_mouse_flush(PS2MouseState *s);
 int ps2_queue_empty(PS2State *s);
 
 #endif /* HW_PS2_H */

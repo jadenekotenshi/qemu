@@ -34,6 +34,7 @@ typedef struct KBDState {
     PS2KbdState ps2kbd;
     PS2MouseState ps2mouse;
     QEMUTimer *throttle_timer;
+    bool mouse_throttle;       /* also pace the aux (mouse) bytes */
 
     qemu_irq irqs[2];
     qemu_irq a20_out;
@@ -58,6 +59,7 @@ struct ISAKBDState {
 
     KBDState kbd;
     bool kbd_throttle;
+    bool mouse_throttle;
     MemoryRegion io[2];
     uint8_t kbd_irq;
     uint8_t mouse_irq;
