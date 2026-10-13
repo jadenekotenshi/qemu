@@ -330,11 +330,15 @@ static void sparc32_espdma_device_realize(DeviceState *dev, Error **errp)
  * move data, and the OPENSTEP 4.2 kernel for SPARC relies on that: it lowers
  * its interrupt level a few instructions before releasing a lock that its
  * SCSI interrupt handler takes, so an interrupt that is already pending
- * deadlocks it. Set to 0 for an immediate interrupt.
+ * deadlocks it. The delay only has to be long enough for the guest to get
+ * past those few instructions; the interrupt is raised from another thread,
+ * so even 1 us works. Every command takes several interrupts, so keep it
+ * short: 500 us here made a 64 KB disk read take about 8 ms. Set to 0 for an
+ * immediate interrupt.
  */
 static const Property sparc32_espdma_properties[] = {
     DEFINE_PROP_UINT32("esp-irq-delay-ns", ESPDMADeviceState,
-                       esp_irq_delay_ns, 500 * 1000),
+                       esp_irq_delay_ns, 10 * 1000),
 };
 
 static void sparc32_espdma_device_class_init(ObjectClass *klass,
