@@ -343,6 +343,34 @@ int qemu_poll_ns(GPollFD *fds, guint nfds, int64_t timeout)
         return ppoll((struct pollfd *)fds, nfds, &ts, NULL);
     }
 #else
+    /*
+     * g_poll() only takes whole milliseconds and qemu_timeout_ns_to_ms()
+     * rounds up, so on hosts without ppoll() (macOS) a timer due in a few
+     * microseconds is not run for a millisecond or more. Device models that
+     * model short hardware delays (the ESP's interrupt, for one) then
+     * stretch every one of them to a millisecond. Wait for such short
+     * timeouts by polling without blocking and sleeping briefly.
+     */
+    if (timeout > 0 && timeout < SCALE_MS) {
+        int64_t deadline = qemu_clock_get_ns(QEMU_CLOCK_HOST) + timeout;
+        int ret;
+
+        for (;;) {
+            int64_t left;
+
+            ret = g_poll(fds, nfds, 0);
+            if (ret != 0) {
+                return ret;
+            }
+            left = deadline - qemu_clock_get_ns(QEMU_CLOCK_HOST);
+            if (left <= 0) {
+                return 0;
+            }
+            if (left > 150 * SCALE_US) {
+                g_usleep((left - 100 * SCALE_US) / SCALE_US);
+            }
+        }
+    }
     return g_poll(fds, nfds, qemu_timeout_ns_to_ms(timeout));
 #endif
 }
