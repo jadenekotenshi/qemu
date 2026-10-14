@@ -102,11 +102,7 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
 {
     unsigned cnt = ((insn >> 23) & 0x1f) + 1;
     unsigned op = (insn >> 19) & 0xf;
-    /*
-     * PACKED is a byte per register like UBYTE_0, but it is the type the
-     * X server uses for runs of 8 bit pixels (a count of N touches N bytes)
-     */
-    unsigned type = ((insn >> 14) & 0x1f) == 0x1f ? 0 : (insn >> 14) & 0x1f;
+    unsigned type = (insn >> 14) & 0x1f;
     unsigned reg = (insn >> 7) & 0x7f;
     hwaddr a = base + (insn & 0x7f);
     unsigned i, k;
@@ -139,6 +135,9 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
     case 0x08 ... 0x0f:
     case 0x1b:
         nbytes = 4 * cnt;
+        break;
+    case 0x1f:
+        nbytes = cnt;       /* packed: cnt bytes, four to a register */
         break;
     case 0x18 ... 0x1a:
     case 0x1c ... 0x1e:
@@ -293,6 +292,36 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
                 WR(wa + 2, v >> 8);
                 WR(wa + 3, v);
             }
+        }
+        break;
+    case 0x1f: /* PACKED: cnt bytes, four per register, first byte on top */
+        if (load) {
+            for (i = 0; i < cnt; i += 4) {
+                uint32_t v = 0;
+
+                for (k = 0; k < 4; k++) {
+                    v = (v << 8) | (i + k < cnt ? RD(i + k) : 0);
+                }
+                sx_setreg(s, reg + i / 4, v);
+            }
+            break;
+        }
+        for (i = 0; i < cnt; i++) {
+            unsigned lane = 24 - 8 * (i % 4);
+            uint8_t v;
+
+            if (select) {
+                v = *sx_reg(s, reg + sx_mask_bit(s, i)) >> lane;
+            } else {
+                if (cond && !(i < 32 && sx_mask_bit(s, i))) {
+                    continue;
+                }
+                v = *sx_reg(s, reg + i / 4) >> lane;
+            }
+            if (planemask) {
+                v = (RD(i) & ~(pm >> lane)) | (v & (pm >> lane));
+            }
+            WR(i, v);
         }
         break;
     default:
