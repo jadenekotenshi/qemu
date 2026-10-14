@@ -252,6 +252,33 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
                 sx_setreg(s, reg + i, (RD(wa) << 24) |
                           (RD(wa + 1) << 16) | (RD(wa + 2) << 8) |
                           RD(wa + 3));
+            } else if (type == 0x1b && (select || cond)) {
+                /*
+                 * LONG elements are whole 32 bit pixels, one mask bit each
+                 * (the packed type below carries four 8 bit pixels a word)
+                 */
+                if (select) {
+                    uint32_t v = *sx_reg(s, reg + sx_mask_bit(s, i));
+
+                    if (planemask) {
+                        uint32_t old = (RD(wa) << 24) |
+                            (RD(wa + 1) << 16) | (RD(wa + 2) << 8) |
+                            RD(wa + 3);
+
+                        v = (old & ~pm) | (v & pm);
+                    }
+                    WR(wa, v >> 24);
+                    WR(wa + 1, v >> 16);
+                    WR(wa + 2, v >> 8);
+                    WR(wa + 3, v);
+                } else if (i < 32 && sx_mask_bit(s, i)) {
+                    uint32_t v = *sx_reg(s, reg + i);
+
+                    WR(wa, v >> 24);
+                    WR(wa + 1, v >> 16);
+                    WR(wa + 2, v >> 8);
+                    WR(wa + 3, v);
+                }
             } else if (select) {
                 /* word j: byte k comes from the register the mask bit picks */
                 for (k = 0; k < 4; k++) {
