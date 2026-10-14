@@ -1157,6 +1157,9 @@ static void sun4m_hw_init(MachineState *machine)
             qdev_prop_set_uint16(cg6, "height", graphic_height);
             sysbus_realize_and_unref(SYS_BUS_DEVICE(cg6), &error_fatal);
             sysbus_mmio_map(SYS_BUS_DEVICE(cg6), 0, hwdef->tcx_base);
+            /* sbus irq 5, as the other cards in this slot */
+            sysbus_connect_irq(SYS_BUS_DEVICE(cg6), 0,
+                               qdev_get_gpio_in(sbus5_orgate, 0));
             vga_interface_created = true;
         } else if (vga_interface_type == VGA_CG3) {
             if (graphic_depth != 8) {

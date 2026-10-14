@@ -24,6 +24,7 @@
 #include "qemu/datadir.h"
 #include "qemu/error-report.h"
 #include "qemu/timer.h"
+#include "hw/core/irq.h"
 #include "qapi/error.h"
 #include "ui/console.h"
 #include "ui/pixel_ops.h"
@@ -66,6 +67,7 @@
 #define THC_MISC_VIDEN      0x400
 #define THC_MISC_VSYNC      0x100
 #define THC_MISC_INTR       0x10
+#define THC_MISC_INTEN      0x20
 #define CG6_VSYNC_PERIOD_NS (1000000000 / 60)
 
 /* FBC register offsets */
@@ -101,6 +103,14 @@
 #define FBC_ARECTY          0x904
 #define FBC_RRECTX          0x910
 #define FBC_RRECTY          0x914
+#define FBC_APOINTX         0x800
+#define FBC_APOINTY         0x804
+#define FBC_RPOINTX         0x810
+#define FBC_RPOINTY         0x814
+#define FBC_ALINEX          0x840
+#define FBC_ALINEY          0x844
+#define FBC_RLINEX          0x850
+#define FBC_RLINEY          0x854
 #define FBC_REGS            (0x1000 / 4)
 
 /* ALU word */
@@ -147,6 +157,11 @@ struct CG6State {
     int32_t cur_x, cur_y;           /* the last vertex, for relative ones */
 
     bool redraw;
+
+    qemu_irq irq;
+    QEMUTimer *vsync_timer;
+    bool intr;                      /* vertical retrace interrupt pending */
+    bool line_chain;                /* the last vertex starts the next line */
 };
 
 /* ---- palette ---------------------------------------------------------- */
@@ -238,6 +253,11 @@ static void cg6_do_rect(CG6State *s, int x0, int y0, int x1, int y1)
     uint8_t pm = cg6_planemask(s);
     int x, y, t;
 
+    /* the window offset is added to the vertices */
+    x0 += (int32_t)s->fbc[FBC_OFFX / 4];
+    x1 += (int32_t)s->fbc[FBC_OFFX / 4];
+    y0 += (int32_t)s->fbc[FBC_OFFY / 4];
+    y1 += (int32_t)s->fbc[FBC_OFFY / 4];
     if (x0 > x1) {
         t = x0; x0 = x1; x1 = t;
     }
@@ -252,6 +272,48 @@ static void cg6_do_rect(CG6State *s, int x0, int y0, int x1, int y1)
     memory_region_set_dirty(&s->vram_mem, 0, memory_region_size(&s->vram_mem));
     trace_sun_cg6_rect(x0, y0, x1, y1, rop, s->fbc[FBC_FG / 4],
                        s->fbc[FBC_PM / 4], s->fbc[FBC_MODE / 4]);
+}
+
+static void cg6_do_point(CG6State *s, int x, int y)
+{
+    uint8_t *vram = memory_region_get_ram_ptr(&s->vram_mem);
+
+    cg6_pixel(s, vram, x + (int32_t)s->fbc[FBC_OFFX / 4],
+              y + (int32_t)s->fbc[FBC_OFFY / 4], 0, s->fbc[FBC_ALU / 4],
+              cg6_planemask(s));
+    memory_region_set_dirty(&s->vram_mem, 0, memory_region_size(&s->vram_mem));
+}
+
+/* a line from the last vertex to this one, both ends included */
+static void cg6_do_line(CG6State *s, int x0, int y0, int x1, int y1)
+{
+    uint8_t *vram = memory_region_get_ram_ptr(&s->vram_mem);
+    uint32_t rop = s->fbc[FBC_ALU / 4];
+    uint8_t pm = cg6_planemask(s);
+    int offx = (int32_t)s->fbc[FBC_OFFX / 4];
+    int offy = (int32_t)s->fbc[FBC_OFFY / 4];
+    int dx = abs(x1 - x0), dy = -abs(y1 - y0);
+    int sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy;
+
+    for (;;) {
+        int e2;
+
+        cg6_pixel(s, vram, x0 + offx, y0 + offy, 0, rop, pm);
+        if (x0 == x1 && y0 == y1) {
+            break;
+        }
+        e2 = 2 * err;
+        if (e2 >= dy) {
+            err += dy;
+            x0 += sx;
+        }
+        if (e2 <= dx) {
+            err += dx;
+            y0 += sy;
+        }
+    }
+    memory_region_set_dirty(&s->vram_mem, 0, memory_region_size(&s->vram_mem));
 }
 
 static void cg6_do_blit(CG6State *s)
@@ -355,6 +417,10 @@ static void cg6_fbc_write(void *opaque, hwaddr addr, uint64_t val,
 
     addr &= 0xfff;
     trace_sun_cg6_fbc_write(addr, v);
+    if (addr < FBC_APOINTX || addr > FBC_RLINEY) {
+        /* any other write ends a run of connected vertices */
+        s->line_chain = false;
+    }
     switch (addr) {
     case FBC_S:
         s->fbc[addr / 4] = 0;
@@ -398,6 +464,40 @@ static void cg6_fbc_write(void *opaque, hwaddr addr, uint64_t val,
         s->cur_y += (int32_t)s->fbc[FBC_RRECTY / 4];
         cg6_do_rect(s, s->rect_x0, s->rect_y0, s->cur_x, s->cur_y);
         return;
+    case FBC_APOINTX:
+    case FBC_RPOINTX:
+        s->fbc[addr / 4] = v;
+        if (addr == FBC_APOINTX) {
+            s->cur_x = v;
+            s->cur_y = s->fbc[FBC_APOINTY / 4];
+        } else {
+            s->cur_x += (int32_t)v;
+            s->cur_y += (int32_t)s->fbc[FBC_RPOINTY / 4];
+        }
+        cg6_do_point(s, s->cur_x, s->cur_y);
+        s->line_chain = true;
+        return;
+    case FBC_ALINEX:
+    case FBC_RLINEX: {
+        int nx, ny;
+
+        s->fbc[addr / 4] = v;
+        if (addr == FBC_ALINEX) {
+            nx = v;
+            ny = s->fbc[FBC_ALINEY / 4];
+        } else {
+            nx = s->cur_x + (int32_t)v;
+            ny = s->cur_y + (int32_t)s->fbc[FBC_RLINEY / 4];
+        }
+        /* the first vertex of a run only sets the starting point */
+        if (s->line_chain) {
+            cg6_do_line(s, s->cur_x, s->cur_y, nx, ny);
+        }
+        s->line_chain = true;
+        s->cur_x = nx;
+        s->cur_y = ny;
+        return;
+    }
     case FBC_FONT:
         cg6_do_font(s, v);
         return;
@@ -561,7 +661,11 @@ static uint64_t cg6_thc_read(void *opaque, hwaddr addr, unsigned size)
     addr &= 0xfff;
     v = s->thc[addr / 4];
     if (addr == THC_MISC) {
-        v = (v & ~THC_MISC_VSYNC) | ((s->fhc_rev & 15) << THC_MISC_REVSHIFT);
+        v = (v & ~(THC_MISC_VSYNC | THC_MISC_INTR)) |
+            ((s->fhc_rev & 15) << THC_MISC_REVSHIFT);
+        if (s->intr) {
+            v |= THC_MISC_INTR;
+        }
         if ((qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) % CG6_VSYNC_PERIOD_NS) <
             1000000) {
             v |= THC_MISC_VSYNC;
@@ -581,7 +685,15 @@ static void cg6_thc_write(void *opaque, hwaddr addr, uint64_t val,
     trace_sun_cg6_reg("thc", 1, addr, v, size);
     switch (addr) {
     case THC_MISC:
+        /* writing the pending bit acknowledges the interrupt */
+        if (v & THC_MISC_INTR) {
+            s->intr = false;
+        }
         s->thc[addr / 4] = v & ~THC_MISC_INTR;
+        if (!(v & THC_MISC_INTEN)) {
+            s->intr = false;
+        }
+        qemu_set_irq(s->irq, s->intr);
         s->redraw = true;
         return;
     case THC_CURSXY:
@@ -732,6 +844,18 @@ static void cg6_patch_fcode_vmsize(uint8_t *rom, int len, uint32_t megabytes)
 
 /* ---- device ----------------------------------------------------------- */
 
+static void cg6_vsync(void *opaque)
+{
+    CG6State *s = opaque;
+
+    if (s->thc[THC_MISC / 4] & THC_MISC_INTEN) {
+        s->intr = true;
+        qemu_set_irq(s->irq, 1);
+    }
+    timer_mod(s->vsync_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + CG6_VSYNC_PERIOD_NS);
+}
+
 static void cg6_realize(DeviceState *dev, Error **errp)
 {
     CG6State *s = CG6(dev);
@@ -805,6 +929,10 @@ static void cg6_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(&s->slot, CG6_RAM_OFFSET, &s->vram_mem);
 
     sysbus_init_mmio(sbd, &s->slot);
+    sysbus_init_irq(sbd, &s->irq);
+    s->vsync_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, cg6_vsync, s);
+    timer_mod(s->vsync_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + CG6_VSYNC_PERIOD_NS);
 
     s->con = qemu_graphic_console_create(dev, 0, &cg6_gfx_ops, s);
     qemu_console_resize(s->con, s->width, s->height);
@@ -832,6 +960,9 @@ static void cg6_reset(DeviceState *dev)
     s->cur_x = s->cur_y = 0;
     s->lut_dirty = true;
     s->redraw = true;
+    s->intr = false;
+    s->line_chain = false;
+    qemu_set_irq(s->irq, 0);
 }
 
 static int cg6_post_load(void *opaque, int version_id)
@@ -858,6 +989,7 @@ static const VMStateDescription vmstate_cg6 = {
         VMSTATE_UINT32(fhc, CG6State),
         VMSTATE_UINT32_ARRAY(thc, CG6State, 0x1000 / 4),
         VMSTATE_UINT32_ARRAY(fbc, CG6State, FBC_REGS),
+        VMSTATE_BOOL(intr, CG6State),
         VMSTATE_END_OF_LIST()
     }
 };
