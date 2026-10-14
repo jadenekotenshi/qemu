@@ -147,8 +147,13 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
     }
     memset(buf, 0, sizeof(buf));
     if (nbytes && (load || planemask || cond)) {
-        address_space_read(&address_space_memory, a, MEMTXATTRS_UNSPECIFIED,
-                           buf, nbytes);
+        if (address_space_read(&address_space_memory, a,
+                               MEMTXATTRS_UNSPECIFIED, buf, nbytes) !=
+            MEMTX_OK) {
+            qemu_log_mask(LOG_GUEST_ERROR, "sun-sx: read of %u bytes at "
+                          "0x%" HWADDR_PRIx " failed (insn 0x%08x)\n",
+                          nbytes, a, insn);
+        }
     }
 
     switch (type) {
@@ -291,8 +296,13 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
         break;
     }
     if (wrote) {
-        address_space_write(&address_space_memory, a, MEMTXATTRS_UNSPECIFIED,
-                            buf, nbytes);
+        if (address_space_write(&address_space_memory, a,
+                                MEMTXATTRS_UNSPECIFIED, buf, nbytes) !=
+            MEMTX_OK) {
+            qemu_log_mask(LOG_GUEST_ERROR, "sun-sx: write of %u bytes at "
+                          "0x%" HWADDR_PRIx " failed (insn 0x%08x)\n",
+                          nbytes, a, insn);
+        }
     }
 #undef RD
 #undef WR
@@ -365,8 +375,9 @@ static void sx_vec_insn(SunSXState *s, uint32_t insn)
     trace_sun_sx_alu(insn);
 
     for (i = 0; i < cnt; i++) {
-        uint32_t a = *sx_reg(s, sa + i);
-        uint32_t bv = *sx_reg(s, sb + i);
+        /* R0 as the first register of a vector reads as zero throughout */
+        uint32_t a = sa ? *sx_reg(s, sa + i) : 0;
+        uint32_t bv = sb ? *sx_reg(s, sb + i) : 0;
         uint32_t bs = *sx_reg(s, sb);
         uint32_t r;
 
@@ -410,7 +421,8 @@ static void sx_vec_insn(SunSXState *s, uint32_t insn)
             case 5: n = sb & 31; r = a << n; break;
             default: {
                 /* funnel: the top word of (a:next) << n */
-                uint64_t w = ((uint64_t)a << 32) | *sx_reg(s, sa + i + 1);
+                uint64_t w = ((uint64_t)a << 32) |
+                             (sa ? *sx_reg(s, sa + i + 1) : 0);
 
                 n = (mode == 6 ? bs : sb) & 31;
                 r = (w << n) >> 32;
