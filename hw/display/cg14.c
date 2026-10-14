@@ -370,17 +370,9 @@ static void cg14_draw_32(CG14State *s, uint8_t *d, const uint8_t *v)
             unsigned lsrc = xl >> 6, rsrc = (xl >> 4) & 3;
             unsigned lc = (xl >> 2) & 3, rc = xl & 3;
 
-            if (lsrc) {
+            if (lsrc && lc) {
+                /* a component through the CLUT; no component is passthrough */
                 unsigned idx = lc == 3 ? px[3] : lc == 2 ? px[2] : px[1];
-
-                /*
-                 * Solaris gives windows XLUT entries for CLUT2 (0x80) but
-                 * only ever loads its 8 bit palette into CLUT1, which is
-                 * what they show.
-                 */
-                if (!lc && lsrc != 1) {
-                    lsrc = 1;
-                }
                 const uint8_t *e = &s->regs[CG14_CLUT1 +
                     (lsrc - 1) * CG14_CLUT_SIZE + idx * 4];
 
