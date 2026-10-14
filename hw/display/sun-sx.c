@@ -102,7 +102,11 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
 {
     unsigned cnt = ((insn >> 23) & 0x1f) + 1;
     unsigned op = (insn >> 19) & 0xf;
-    unsigned type = (insn >> 14) & 0x1f;
+    /*
+     * PACKED is a byte per register like UBYTE_0, but it is the type the
+     * X server uses for runs of 8 bit pixels (a count of N touches N bytes)
+     */
+    unsigned type = ((insn >> 14) & 0x1f) == 0x1f ? 0 : (insn >> 14) & 0x1f;
     unsigned reg = (insn >> 7) & 0x7f;
     hwaddr a = base + (insn & 0x7f);
     unsigned i, k;
@@ -134,7 +138,6 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
         break;
     case 0x08 ... 0x0f:
     case 0x1b:
-    case 0x1f:
         nbytes = 4 * cnt;
         break;
     case 0x18 ... 0x1a:
@@ -244,7 +247,6 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
         }
         break;
     case 0x1b: /* LONG */
-    case 0x1f: /* PACKED, handled like a long */
         for (i = 0; i < cnt; i++) {
             unsigned wa = 4 * i;
 
@@ -252,11 +254,8 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
                 sx_setreg(s, reg + i, (RD(wa) << 24) |
                           (RD(wa + 1) << 16) | (RD(wa + 2) << 8) |
                           RD(wa + 3));
-            } else if (type == 0x1b && (select || cond)) {
-                /*
-                 * LONG elements are whole 32 bit pixels, one mask bit each
-                 * (the packed type below carries four 8 bit pixels a word)
-                 */
+            } else if (select || cond) {
+                /* LONG elements are whole 32 bit pixels, one mask bit each */
                 if (select) {
                     uint32_t v = *sx_reg(s, reg + sx_mask_bit(s, i));
 
@@ -278,27 +277,6 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
                     WR(wa + 1, v >> 16);
                     WR(wa + 2, v >> 8);
                     WR(wa + 3, v);
-                }
-            } else if (select) {
-                /* word j: byte k comes from the register the mask bit picks */
-                for (k = 0; k < 4; k++) {
-                    uint32_t src = *sx_reg(s, reg + sx_mask_bit(s, 4 * i + k));
-                    uint8_t v = (src >> (24 - 8 * k)) & 0xff;
-
-                    if (planemask) {
-                        v = (RD(wa + k) & ~(pm >> (24 - 8 * k))) |
-                            (v & (pm >> (24 - 8 * k)));
-                    }
-                    WR(wa + k, v);
-                }
-            } else if (cond) {
-                /* only the bytes whose mask bit is set */
-                uint32_t v = *sx_reg(s, reg + i);
-
-                for (k = 0; k < 4; k++) {
-                    if (4 * i + k < 32 && sx_mask_bit(s, 4 * i + k)) {
-                        WR(wa + k, (v >> (24 - 8 * k)) & 0xff);
-                    }
                 }
             } else {
                 uint32_t v = *sx_reg(s, reg + i);
