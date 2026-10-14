@@ -180,7 +180,7 @@ static uint64_t dma_mem_read(void *opaque, hwaddr addr,
     uint32_t saddr;
 
     saddr = (addr & DMA_MASK) >> 2;
-    trace_sparc32_dma_mem_readl(addr, s->dmaregs[saddr]);
+    trace_sparc32_dma_mem_readl(s, addr, s->dmaregs[saddr]);
     return s->dmaregs[saddr];
 }
 
@@ -191,7 +191,7 @@ static void dma_mem_write(void *opaque, hwaddr addr,
     uint32_t saddr;
 
     saddr = (addr & DMA_MASK) >> 2;
-    trace_sparc32_dma_mem_writel(addr, s->dmaregs[saddr], val);
+    trace_sparc32_dma_mem_writel(s, addr, s->dmaregs[saddr], val);
     switch (saddr) {
     case 0:
         if (val & DMA_INTREN) {
@@ -250,6 +250,15 @@ static void sparc32_dma_device_reset(DeviceState *d)
 
     memset(s->dmaregs, 0, DMA_SIZE);
     s->dmaregs[0] = DMA_VER;
+    if (object_dynamic_cast(OBJECT(d), TYPE_SPARC32_LEDMA_DEVICE)) {
+        /*
+         * Ethernet base address register: the top byte of every Lance DMA
+         * address. The PROM sets it up when it probes the chip and Solaris
+         * relies on that rather than writing it itself, so start out with
+         * the bottom of the DVMA window as the PROM leaves it.
+         */
+        s->dmaregs[3] = 0xff000000;
+    }
 }
 
 static const VMStateDescription vmstate_sparc32_dma_device = {
