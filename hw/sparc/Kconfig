@@ -13,6 +13,7 @@ config SUN4M
     select ESCC
     select SUN_BPP
     select CG14
+    select CG6
     select ESP
     select FDC_SYSBUS
     select SLAVIO

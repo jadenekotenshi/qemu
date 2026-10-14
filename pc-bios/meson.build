@@ -43,6 +43,7 @@ blobs = [
   'openbios-ppc',
   'QEMU,tcx.bin',
   'QEMU,cgthree.bin',
+  'QEMU,cgsix.bin',
   'pxe-e1000.rom',
   'pxe-eepro100.rom',
   'pxe-ne2k_pci.rom',

@@ -1082,10 +1082,12 @@ static void sun4m_hw_init(MachineState *machine)
     qdev_connect_gpio_out(sbus5_split, 0, slavio_irq[11]);
 
     if (!graphic_width) {
-        graphic_width = vga_interface_type == VGA_CG14 ? 0 : 1024;
+        graphic_width = vga_interface_type == VGA_CG14 ? 0 :
+                        vga_interface_type == VGA_CG6 ? 1152 : 1024;
     }
     if (!graphic_height) {
-        graphic_height = vga_interface_type == VGA_CG14 ? 0 : 768;
+        graphic_height = vga_interface_type == VGA_CG14 ? 0 :
+                         vga_interface_type == VGA_CG6 ? 900 : 768;
     }
     if (!graphic_depth) {
         graphic_depth = 8;
@@ -1134,6 +1136,27 @@ static void sun4m_hw_init(MachineState *machine)
                 /* memory instructions: writes to 0x8_0000_0000 + target PA */
                 sysbus_mmio_map(SYS_BUS_DEVICE(sx), 1, 0x800000000ULL);
             }
+            vga_interface_created = true;
+        } else if (vga_interface_type == VGA_CG6) {
+            DeviceState *cg6;
+
+            if (graphic_depth != 8) {
+                error_report("Unsupported depth: %d", graphic_depth);
+                exit(1);
+            }
+            if (!(graphic_width == 1024 && graphic_height == 768) &&
+                !(graphic_width == 1152 && graphic_height == 900) &&
+                !(graphic_width == 1280 && graphic_height == 1024) &&
+                !(graphic_width == 1600 && graphic_height == 1200)) {
+                error_report("Unsupported resolution: %d x %d", graphic_width,
+                             graphic_height);
+                exit(1);
+            }
+            cg6 = qdev_new("sun-cg6");
+            qdev_prop_set_uint16(cg6, "width", graphic_width);
+            qdev_prop_set_uint16(cg6, "height", graphic_height);
+            sysbus_realize_and_unref(SYS_BUS_DEVICE(cg6), &error_fatal);
+            sysbus_mmio_map(SYS_BUS_DEVICE(cg6), 0, hwdef->tcx_base);
             vga_interface_created = true;
         } else if (vga_interface_type == VGA_CG3) {
             if (graphic_depth != 8) {

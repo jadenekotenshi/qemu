@@ -2559,7 +2559,7 @@ SRST
 ERST
 
 DEF("vga", HAS_ARG, QEMU_OPTION_vga,
-    "-vga [std|cirrus|vmware|qxl|xenfb|tcx|cg3|cg14|virtio|none]\n"
+    "-vga [std|cirrus|vmware|qxl|xenfb|tcx|cg3|cg14|cg6|virtio|none]\n"
     "                select video card type\n", QEMU_ARCH_ALL)
 SRST
 ``-vga type``
@@ -2610,6 +2610,13 @@ SRST
     ``cg14``
         (SPARCstation 10/20 only) Sun cgfourteen framebuffer with its SX
         accelerator, at 1152x900 by default.
+
+    ``cg6``
+        (sun4m only) Sun cgsix (GX) SBus framebuffer: 8-bit colour with a
+        hardware cursor and the FBC blitter, rectangle fill and glyph
+        operations, for guests such as SunOS 4 that know neither the TCX
+        nor the cg14. 1152x900 by default; ``-g`` can select 1024x768,
+        1152x900, 1280x1024 or 1600x1200.
 
     ``virtio``
         Virtio VGA card.

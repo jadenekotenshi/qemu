@@ -89,6 +89,9 @@ config CG3
 config CG14
     bool
 
+config CG6
+    bool
+
 config ARTIST
     bool
     select FRAMEBUFFER
