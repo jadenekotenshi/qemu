@@ -294,20 +294,32 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
             }
         }
         break;
-    case 0x1f: /* PACKED: cnt bytes, four per register, first byte on top */
-        if (load) {
-            for (i = 0; i < cnt; i += 4) {
-                uint32_t v = 0;
+    case 0x1f: {
+        /*
+         * PACKED: cnt bytes of 8 bit pixels, four to a register, first byte
+         * on top. The byte at address a sits in lane (a & 7) of the 64 bit
+         * block it belongs to: a load fills the registers from every block
+         * the bytes touch (including the bytes around them, which the
+         * Solaris copy loops rely on when they funnel shift whole words),
+         * and a store takes byte e from stream position (a & 7) + e.
+         */
+        unsigned off = a & 7;
 
-                for (k = 0; k < 4; k++) {
-                    v = (v << 8) | (i + k < cnt ? RD(i + k) : 0);
-                }
-                sx_setreg(s, reg + i / 4, v);
+        if (load) {
+            uint8_t blk[48];
+            unsigned nb = (off + cnt + 7) / 8;
+
+            memset(blk, 0, sizeof(blk));
+            address_space_read(&address_space_memory, a - off,
+                               MEMTXATTRS_UNSPECIFIED, blk, nb * 8);
+            for (i = 0; i < nb * 2; i++) {
+                sx_setreg(s, reg + i, ldl_be_p(blk + 4 * i));
             }
             break;
         }
         for (i = 0; i < cnt; i++) {
-            unsigned lane = 24 - 8 * (i % 4);
+            unsigned q = off + i;
+            unsigned lane = 24 - 8 * (q % 4);
             uint8_t v;
 
             if (select) {
@@ -316,7 +328,7 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
                 if (cond && !(i < 32 && sx_mask_bit(s, i))) {
                     continue;
                 }
-                v = *sx_reg(s, reg + i / 4) >> lane;
+                v = *sx_reg(s, reg + q / 4) >> lane;
             }
             if (planemask) {
                 v = (RD(i) & ~(pm >> lane)) | (v & (pm >> lane));
@@ -324,6 +336,7 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
             WR(i, v);
         }
         break;
+    }
     default:
         qemu_log_mask(LOG_UNIMP, "sun-sx: unimplemented memory data type "
                       "0x%x (insn 0x%08x)\n", type, insn);
