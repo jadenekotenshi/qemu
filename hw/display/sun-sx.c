@@ -82,21 +82,6 @@ static void sx_setreg(SunSXState *s, unsigned n, uint32_t v)
 #define SXM_OP_SELECT       0x8
 #define SXM_OP_LOAD         0xa
 
-static uint8_t sx_rd8(hwaddr a)
-{
-    uint8_t v = 0;
-
-    address_space_read(&address_space_memory, a, MEMTXATTRS_UNSPECIFIED,
-                       &v, 1);
-    return v;
-}
-
-static void sx_wr8(hwaddr a, uint8_t v)
-{
-    address_space_write(&address_space_memory, a, MEMTXATTRS_UNSPECIFIED,
-                        &v, 1);
-}
-
 static inline unsigned sx_mask_bit(SunSXState *s, unsigned i)
 {
     return (s->r[R_MASK] >> (31 - (i & 31))) & 1;
@@ -129,13 +114,48 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
     unsigned shift = 8 * (type & 3);
     uint32_t pm = s->regs[SX_PLANEMASK / 4];
 
+    uint8_t buf[128];       /* the bytes the instruction touches, at most */
+    unsigned nbytes;
+    bool wrote = false;
+
+#define RD(o)    (buf[(o)])
+#define WR(o, v) do { buf[(o)] = (v); wrote = true; } while (0)
+
     trace_sun_sx_mem(a, insn, cnt);
+
+    /*
+     * Move the whole span with one access instead of one per byte; the
+     * address space lookup and the dirty tracking cost far more than the
+     * copy. Writes that leave some bytes alone start from the old contents.
+     */
+    switch (type) {
+    case 0x00 ... 0x07:
+        nbytes = cnt;
+        break;
+    case 0x08 ... 0x0f:
+    case 0x1b:
+    case 0x1f:
+        nbytes = 4 * cnt;
+        break;
+    case 0x18 ... 0x1a:
+    case 0x1c ... 0x1e:
+        nbytes = 2 * cnt;
+        break;
+    default:
+        nbytes = 0;
+        break;
+    }
+    memset(buf, 0, sizeof(buf));
+    if (nbytes && (load || planemask || cond)) {
+        address_space_read(&address_space_memory, a, MEMTXATTRS_UNSPECIFIED,
+                           buf, nbytes);
+    }
 
     switch (type) {
     case 0x00 ... 0x07: /* U/S BYTE_n: one byte per register */
         for (i = 0; i < cnt; i++) {
             if (load) {
-                uint32_t v = sx_rd8(a + i);
+                uint32_t v = RD(i);
 
                 if (type & 4) {
                     v = (uint32_t)(int32_t)(int8_t)v;
@@ -146,9 +166,9 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
                 uint8_t v = (src >> shift) & 0xff;
 
                 if (planemask) {
-                    v = (sx_rd8(a + i) & ~pm) | (v & pm);
+                    v = (RD(i) & ~pm) | (v & pm);
                 }
-                sx_wr8(a + i, v);
+                WR(i, v);
             } else {
                 uint8_t v = sx_store_byte(*sx_reg(s, reg + i), shift, clamp);
 
@@ -156,20 +176,20 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
                     continue;
                 }
                 if (planemask) {
-                    v = (sx_rd8(a + i) & ~pm) | (v & pm);
+                    v = (RD(i) & ~pm) | (v & pm);
                 }
-                sx_wr8(a + i, v);
+                WR(i, v);
             }
         }
         break;
     case 0x08 ... 0x0f: /* U/S QUAD_n: four bytes of a word, four registers */
         for (i = 0; i < cnt; i++) {
             for (k = 0; k < 4; k++) {
-                hwaddr ba = a + 4 * i + k;
+                unsigned ba = 4 * i + k;
                 unsigned rn = reg + 4 * i + k;
 
                 if (load) {
-                    uint32_t v = sx_rd8(ba);
+                    uint32_t v = RD(ba);
 
                     if (type & 4) {
                         v = (uint32_t)(int32_t)(int8_t)v;
@@ -180,9 +200,9 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
                     uint8_t v = (src >> shift) & 0xff;
 
                     if (planemask) {
-                        v = (sx_rd8(ba) & ~pm) | (v & pm);
+                        v = (RD(ba) & ~pm) | (v & pm);
                     }
-                    sx_wr8(ba, v);
+                    WR(ba, v);
                 } else {
                     uint8_t v = sx_store_byte(*sx_reg(s, rn), shift, clamp);
 
@@ -191,9 +211,9 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
                         continue;
                     }
                     if (planemask) {
-                        v = (sx_rd8(ba) & ~pm) | (v & pm);
+                        v = (RD(ba) & ~pm) | (v & pm);
                     }
-                    sx_wr8(ba, v);
+                    WR(ba, v);
                 }
             }
         }
@@ -201,10 +221,10 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
     case 0x18 ... 0x1a: /* USHORT_n */
     case 0x1c ... 0x1e: /* SSHORT_n */
         for (i = 0; i < cnt; i++) {
-            hwaddr ha = a + 2 * i;
+            unsigned ha = 2 * i;
 
             if (load) {
-                uint32_t v = (sx_rd8(ha) << 8) | sx_rd8(ha + 1);
+                uint32_t v = (RD(ha) << 8) | RD(ha + 1);
 
                 if (type & 4) {
                     v = (uint32_t)(int32_t)(int16_t)v;
@@ -213,20 +233,20 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
             } else {
                 uint32_t v = *sx_reg(s, reg + i) >> shift;
 
-                sx_wr8(ha, v >> 8);
-                sx_wr8(ha + 1, v);
+                WR(ha, v >> 8);
+                WR(ha + 1, v);
             }
         }
         break;
     case 0x1b: /* LONG */
     case 0x1f: /* PACKED, handled like a long */
         for (i = 0; i < cnt; i++) {
-            hwaddr wa = a + 4 * i;
+            unsigned wa = 4 * i;
 
             if (load) {
-                sx_setreg(s, reg + i, (sx_rd8(wa) << 24) |
-                          (sx_rd8(wa + 1) << 16) | (sx_rd8(wa + 2) << 8) |
-                          sx_rd8(wa + 3));
+                sx_setreg(s, reg + i, (RD(wa) << 24) |
+                          (RD(wa + 1) << 16) | (RD(wa + 2) << 8) |
+                          RD(wa + 3));
             } else if (select) {
                 /* word j: byte k comes from the register the mask bit picks */
                 for (k = 0; k < 4; k++) {
@@ -234,10 +254,10 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
                     uint8_t v = (src >> (24 - 8 * k)) & 0xff;
 
                     if (planemask) {
-                        v = (sx_rd8(wa + k) & ~(pm >> (24 - 8 * k))) |
+                        v = (RD(wa + k) & ~(pm >> (24 - 8 * k))) |
                             (v & (pm >> (24 - 8 * k)));
                     }
-                    sx_wr8(wa + k, v);
+                    WR(wa + k, v);
                 }
             } else if (cond) {
                 /* only the bytes whose mask bit is set */
@@ -245,23 +265,23 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
 
                 for (k = 0; k < 4; k++) {
                     if (4 * i + k < 32 && sx_mask_bit(s, 4 * i + k)) {
-                        sx_wr8(wa + k, (v >> (24 - 8 * k)) & 0xff);
+                        WR(wa + k, (v >> (24 - 8 * k)) & 0xff);
                     }
                 }
             } else {
                 uint32_t v = *sx_reg(s, reg + i);
 
                 if (planemask) {
-                    uint32_t old = (sx_rd8(wa) << 24) |
-                        (sx_rd8(wa + 1) << 16) | (sx_rd8(wa + 2) << 8) |
-                        sx_rd8(wa + 3);
+                    uint32_t old = (RD(wa) << 24) |
+                        (RD(wa + 1) << 16) | (RD(wa + 2) << 8) |
+                        RD(wa + 3);
 
                     v = (old & ~pm) | (v & pm);
                 }
-                sx_wr8(wa, v >> 24);
-                sx_wr8(wa + 1, v >> 16);
-                sx_wr8(wa + 2, v >> 8);
-                sx_wr8(wa + 3, v);
+                WR(wa, v >> 24);
+                WR(wa + 1, v >> 16);
+                WR(wa + 2, v >> 8);
+                WR(wa + 3, v);
             }
         }
         break;
@@ -270,6 +290,12 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
                       "0x%x (insn 0x%08x)\n", type, insn);
         break;
     }
+    if (wrote) {
+        address_space_write(&address_space_memory, a, MEMTXATTRS_UNSPECIFIED,
+                            buf, nbytes);
+    }
+#undef RD
+#undef WR
 }
 
 /* ---- ALU instructions ----------------------------------------------- */
