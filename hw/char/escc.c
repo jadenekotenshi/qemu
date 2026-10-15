@@ -278,7 +278,13 @@ static void escc_update_irq(ESCCChannelState *s)
     irq |= escc_update_irq_chn(s->otherchn);
 
     trace_escc_update_irq(irq);
+    /*
+     * Both channels' outputs carry the combined state: a line left high by
+     * an earlier update from the other channel would otherwise keep the
+     * interrupt asserted after the last pending condition went away.
+     */
     qemu_set_irq(s->irq, irq);
+    qemu_set_irq(s->otherchn->irq, irq);
 }
 
 static void escc_reset_chn(ESCCChannelState *s)
