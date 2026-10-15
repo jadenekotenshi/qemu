@@ -574,6 +574,11 @@ static const struct {
     uint8_t sense;
 } cg14_modes[] = {
     { 1024, 768, 0 },
+    /*
+     * The ROM picks 1600x1280 at 76 Hz here, which Solaris 2.6's cgfourteen
+     * driver has no timing entry for (it only knows 66 Hz and panics on a NULL
+     * lookup).  At the ok prompt: setenv output-device screen:r1600x1280x66
+     */
     { 1600, 1280, 2 },
     { 1280, 1024, 4 },
     { 1152, 900, 6 },
