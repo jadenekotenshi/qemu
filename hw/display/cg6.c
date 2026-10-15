@@ -121,6 +121,7 @@
 #define FBC_MODE_MASK       0x00060000
 #define FBC_MODE_COLOR8     0x00020000
 #define FBC_MODE_COLOR1     0x00040000
+#define FBC_MODE_VBLANK     0x00080000  /* latched at each retrace, write 1 to clear */
 
 #define TYPE_CG6 "sun-cg6"
 OBJECT_DECLARE_SIMPLE_TYPE(CG6State, CG6)
@@ -160,6 +161,7 @@ struct CG6State {
 
     qemu_irq irq;
     QEMUTimer *vsync_timer;
+    bool vblank;                    /* FBC_MODE_VBLANK: a retrace since it was cleared */
     bool intr;                      /* vertical retrace interrupt pending */
     bool line_chain;                /* the last vertex starts the next line */
 };
@@ -404,6 +406,8 @@ static uint64_t cg6_fbc_read(void *opaque, hwaddr addr, unsigned size)
     case FBC_DRAW:
     case FBC_S:
         return 0;               /* never busy */
+    case FBC_MODE:
+        return s->fbc[FBC_MODE / 4] | (s->vblank ? FBC_MODE_VBLANK : 0);
     default:
         return s->fbc[(addr & 0xfff) / 4];
     }
@@ -422,6 +426,13 @@ static void cg6_fbc_write(void *opaque, hwaddr addr, uint64_t val,
         s->line_chain = false;
     }
     switch (addr) {
+    case FBC_MODE:
+        /* the retrace flag is not a mode bit: writing a one clears it */
+        if (v & FBC_MODE_VBLANK) {
+            s->vblank = false;
+        }
+        s->fbc[addr / 4] = v & ~FBC_MODE_VBLANK;
+        return;
     case FBC_S:
         s->fbc[addr / 4] = 0;
         return;
@@ -848,6 +859,7 @@ static void cg6_vsync(void *opaque)
 {
     CG6State *s = opaque;
 
+    s->vblank = true;
     if (s->thc[THC_MISC / 4] & THC_MISC_INTEN) {
         s->intr = true;
         qemu_set_irq(s->irq, 1);
