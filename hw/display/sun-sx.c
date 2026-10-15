@@ -60,6 +60,7 @@ struct SunSXState {
     MemoryRegion window;
     uint32_t regs[SX_REG_SIZE / 4]; /* control registers */
     uint32_t r[SX_NREGS];           /* the SX register file */
+    unsigned ld_regs;               /* registers the last load filled */
 };
 
 static inline uint32_t *sx_reg(SunSXState *s, unsigned n)
@@ -384,6 +385,9 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
                       "0x%x (insn 0x%08x)\n", type, insn);
         break;
     }
+    if (load) {
+        s->ld_regs = type == 0x1f ? (cnt + (a & 3) + 3) / 4 : cnt;
+    }
     if (wrote) {
         if (address_space_write(&address_space_memory, a,
                                 MEMTXATTRS_UNSPECIFIED, buf, nbytes) !=
@@ -410,6 +414,17 @@ static void sx_rop_insn(SunSXState *s, uint32_t insn)
     unsigned i, bit;
 
     trace_sun_sx_alu(insn);
+
+    /*
+     * Xsun builds these as 0x90000000 | ((n - 1) << 24), so a count of 32
+     * is encoded like 16 (the extra count bit is the class bit that is set
+     * anyway). When the load that fed the operation filled more than 16
+     * registers the count was 32; without this the XOR outline it draws
+     * while a window is dragged only inverted half of every 32 pixels.
+     */
+    if (cnt == 16 && s->ld_regs > 16) {
+        cnt = MIN(s->ld_regs, 32);
+    }
 
     if (mode > 2) {
         qemu_log_mask(LOG_UNIMP, "sun-sx: unimplemented select insn "
