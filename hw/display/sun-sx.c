@@ -124,6 +124,48 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
 
     trace_sun_sx_mem(a, insn, cnt);
 
+    if ((insn & 0x7f) >= 8 && type == 0x1b) {
+        /* the same scatter for whole words: Solaris 9's 24 bit lines */
+        unsigned areg = insn & 0x7f;
+
+        for (i = 0; i < cnt; i++) {
+            hwaddr ea = base + (int32_t)*sx_reg(s, areg + i);
+            uint32_t v;
+
+            if (load) {
+                uint8_t w[4];
+
+                address_space_read(&address_space_memory, ea,
+                                   MEMTXATTRS_UNSPECIFIED, w, 4);
+                sx_setreg(s, reg + i, ldl_be_p(w));
+                continue;
+            }
+            if (select) {
+                v = *sx_reg(s, reg + sx_mask_bit(s, i));
+            } else {
+                if (cond && !(i < 32 && sx_mask_bit(s, i))) {
+                    continue;
+                }
+                v = *sx_reg(s, reg + i);
+            }
+            if (planemask) {
+                uint8_t w[4];
+
+                address_space_read(&address_space_memory, ea,
+                                   MEMTXATTRS_UNSPECIFIED, w, 4);
+                v = (ldl_be_p(w) & ~pm) | (v & pm);
+            }
+            {
+                uint8_t w[4];
+
+                stl_be_p(w, v);
+                address_space_write(&address_space_memory, ea,
+                                    MEMTXATTRS_UNSPECIFIED, w, 4);
+            }
+        }
+        return;
+    }
+
     if ((insn & 0x7f) >= 8 && type == 0x00) {
         /*
          * An offset past the alignment bits names the first of a vector of
