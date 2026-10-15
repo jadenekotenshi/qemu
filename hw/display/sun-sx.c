@@ -123,6 +123,46 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
 
     trace_sun_sx_mem(a, insn, cnt);
 
+    if ((insn & 0x7f) >= 8 && type == 0x00) {
+        /*
+         * An offset past the alignment bits names the first of a vector of
+         * address registers instead (Xsun's line drawing builds one with the
+         * Bresenham instruction below): element e works at base + R[offset
+         * + e].
+         */
+        unsigned areg = insn & 0x7f;
+
+        for (i = 0; i < cnt; i++) {
+            hwaddr ea = base + (int32_t)*sx_reg(s, areg + i);
+            uint8_t v;
+
+            if (load) {
+                address_space_read(&address_space_memory, ea,
+                                   MEMTXATTRS_UNSPECIFIED, &v, 1);
+                sx_setreg(s, reg + i, v);
+                continue;
+            }
+            if (select) {
+                v = *sx_reg(s, reg + sx_mask_bit(s, i));
+            } else {
+                if (cond && !(i < 32 && sx_mask_bit(s, i))) {
+                    continue;
+                }
+                v = *sx_reg(s, reg + i);
+            }
+            if (planemask) {
+                uint8_t old;
+
+                address_space_read(&address_space_memory, ea,
+                                   MEMTXATTRS_UNSPECIFIED, &old, 1);
+                v = (old & ~pm) | (v & pm);
+            }
+            address_space_write(&address_space_memory, ea,
+                                MEMTXATTRS_UNSPECIFIED, &v, 1);
+        }
+        return;
+    }
+
     /*
      * Move the whole span with one access instead of one per byte; the
      * address space lookup and the dirty tracking cost far more than the
@@ -499,6 +539,29 @@ static void sx_gather_insn(SunSXState *s, uint32_t insn)
     unsigned i;
 
     trace_sun_sx_alu(insn);
+    if (mode == 1) {
+        /*
+         * Bresenham pixel addresses, not in NetBSD's sxreg.h: R[sa] is the
+         * last address, R[sa + 1] the error term; R[sp] and R[sp + 2] are the
+         * address steps for the straight and the diagonal move, R[sp + 1] and
+         * R[sp + 3] what the error changes by. d, d + 1... get the next
+         * addresses and R[d + cnt] the error to carry on with.
+         */
+        uint32_t addr = *sx_reg(s, sa);
+        int32_t err = *sx_reg(s, sa + 1);
+        int32_t step[2] = { *sx_reg(s, sp), *sx_reg(s, sp + 2) };
+        int32_t inc[2] = { *sx_reg(s, sp + 1), *sx_reg(s, sp + 3) };
+
+        for (i = 0; i < cnt; i++) {
+            int diag = err >= 0;
+
+            addr += step[diag];
+            err += inc[diag];
+            sx_setreg(s, d + i, addr);
+        }
+        sx_setreg(s, d + cnt, err);
+        return;
+    }
     for (i = 0; i < cnt; i++) {
         if (mode == 3) { /* gather: spaced sources, packed result */
             sx_setreg(s, d + i, *sx_reg(s, sa + i * sp));
