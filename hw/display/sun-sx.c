@@ -296,23 +296,25 @@ static void sx_mem_insn(SunSXState *s, hwaddr base, uint32_t insn)
         break;
     case 0x1f: {
         /*
-         * PACKED: cnt bytes of 8 bit pixels, four to a register, first byte
-         * on top. The byte at address a sits in lane (a & 7) of the 64 bit
-         * block it belongs to: a load fills the registers from every block
-         * the bytes touch (including the bytes around them, which the
-         * Solaris copy loops rely on when they funnel shift whole words),
-         * and a store takes byte e from stream position (a & 7) + e.
+         * PACKED: cnt bytes of 8 bit pixels, four to a register, the first
+         * byte on top. The registers line up with the 32 bit word the
+         * address is in, so byte e sits in lane ((a & 3) + e) % 4 of the
+         * register ((a & 3) + e) / 4 words along; a load takes the bytes
+         * around the first and last one from memory. Solaris realigns a
+         * copy by funnel shifting those registers, so the lanes have to be
+         * right at both ends of every chunk (replaying logged window drags
+         * through this layout reproduces the source pixels exactly).
          */
-        unsigned off = a & 7;
+        unsigned off = a & 3;
 
         if (load) {
             uint8_t blk[48];
-            unsigned nb = (off + cnt + 7) / 8;
+            unsigned nw = (off + cnt + 3) / 4;
 
             memset(blk, 0, sizeof(blk));
             address_space_read(&address_space_memory, a - off,
-                               MEMTXATTRS_UNSPECIFIED, blk, nb * 8);
-            for (i = 0; i < nb * 2; i++) {
+                               MEMTXATTRS_UNSPECIFIED, blk, nw * 4);
+            for (i = 0; i < nw; i++) {
                 sx_setreg(s, reg + i, ldl_be_p(blk + 4 * i));
             }
             break;
