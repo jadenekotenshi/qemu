@@ -44,6 +44,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(SunSXState, SUN_SX)
 #define SX_PLANEMASK         0x10
 #define SX_ROP_CONTROL       0x14
 #define SX_INSTRUCTIONS      0x20
+#define SX_INSTRUCTIONS2     0x24  /* a second port: Solaris 9 fills 32 registers with two */
 #define SX_ID                0x28
 #define SX_ID_VALUE          0x00000001
 #define SX_SOFTRESET         0x30
@@ -732,7 +733,7 @@ static void sx_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
         sx_setreg(s, (addr - SX_DIRECT_R0) >> 2, val);
     } else if (addr >= SX_QUEUED_R0 && addr < SX_QUEUED_R0 + SX_NREGS * 4) {
         sx_setreg(s, (addr - SX_QUEUED_R0) >> 2, val);
-    } else if (addr == SX_INSTRUCTIONS) {
+    } else if (addr == SX_INSTRUCTIONS || addr == SX_INSTRUCTIONS2) {
         sx_alu_insn(s, val);
     } else if (addr == SX_SOFTRESET) {
         memset(s->r, 0, sizeof(s->r));
