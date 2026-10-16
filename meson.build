@@ -1486,6 +1486,8 @@ if host_os == 'linux' and have_tools and get_option('mpath').allowed()
     endif
     mpathlibs += cc.find_library('multipath',
                                  required: get_option('mpath'))
+    mpathlibs += cc.find_library('mpathcmd',
+                                 required: get_option('mpath'))
     foreach lib: mpathlibs
       if not lib.found()
         mpathlibs = []
@@ -3761,7 +3763,6 @@ subdir('dump')
 subdir('accel')
 
 subdir('backends')
-subdir('configs/targets')
 subdir('disas')
 subdir('migration')
 subdir('monitor')
@@ -4353,11 +4354,7 @@ foreach target : target_dirs
     endif
   endif
 
-  if target in config_target_info
-    arch_srcs += config_target_info[target]
-  else
-    arch_srcs += files('target-info-stub.c')
-  endif
+  arch_srcs += files('target-info-def.c')
 
   if target_base_arch in target_arch
     t = target_arch[target_base_arch].apply(config_target, strict: false)
