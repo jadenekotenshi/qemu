@@ -239,9 +239,10 @@ sun_sx_mem(uint64_t addr, uint32_t insn, unsigned count) "memory insn at 0x%"PRI
 sun_sx_alu(uint32_t insn) "alu insn 0x%08x"
 
 # cg6.c
-sun_cg6_rect(int x0, int y0, int x1, int y1, uint32_t rop, uint32_t fg, uint32_t pm, uint32_t mode) "rect %d,%d - %d,%d rop 0x%08x fg 0x%x pm 0x%x mode 0x%08x"
+sun_cg6_rect(int x0, int y0, int x1, int y1, uint32_t rop, uint32_t fg, uint32_t mode, uint32_t offs, uint32_t cmin, uint32_t cmax) "rect %d,%d - %d,%d rop 0x%08x fg 0x%x mode 0x%08x offs 0x%08x cmin 0x%08x cmax 0x%08x"
 sun_cg6_blit(int sx, int sy, int dx, int dy, int w, int h, uint32_t rop) "blit %d,%d -> %d,%d size %dx%d rop 0x%08x"
-sun_cg6_font(int x, int y, int n, uint32_t bits) "font row at %d,%d, %d pixels 0x%08x"
+sun_cg6_font(int x, int y, int n, uint32_t bits, uint32_t rop, uint32_t fg, uint32_t bg, uint32_t offs, uint32_t cmin, uint32_t cmax) "font row at %d,%d, %d pixels 0x%08x rop 0x%08x fg 0x%x bg 0x%x offs 0x%08x cmin 0x%08x cmax 0x%08x"
+sun_cg6_poly(uint32_t addr, uint32_t val, int offx, int offy) "poly write 0x%03x = 0x%08x off %d,%d"
 sun_cg6_fbc_write(uint32_t addr, uint32_t val) "fbc write 0x%03x = 0x%08x"
 sun_cg6_fbc_read(uint32_t addr) "fbc read 0x%03x"
 sun_cg6_reg(const char *bank, int write, uint32_t addr, uint32_t val, unsigned size) "%s write=%d 0x%04x = 0x%08x size %u"

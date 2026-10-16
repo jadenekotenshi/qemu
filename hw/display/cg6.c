@@ -121,6 +121,20 @@
 #define FBC_MODE_MASK       0x00060000
 #define FBC_MODE_COLOR8     0x00020000
 #define FBC_MODE_COLOR1     0x00040000
+#define FBC_POLYG_NONOVERLAP 0x02000000 /* ALU: a rectangle excludes its far edges */
+#define FBC_DRAW_HARDWARE   0x10   /* draw status: the hardware drew it */
+#define FBC_DRAW_SOFTWARE   0x08   /* ... or software has to */
+#define FBC_DRAW_HIDDEN     0x04
+#define FBC_DRAW_INTERSECT  0x02
+#define FBC_DRAW_VISIBLE    0x01
+#define FBC_BLIT_HARDWARE   0x8000
+#define FBC_BLIT_SOFTWARE   0x4000
+#define FBC_BLIT_SRC_HIDDEN 0x2000
+#define FBC_BLIT_SRC_INTERSECT 0x1000
+#define FBC_BLIT_SRC_VISIBLE 0x0800
+#define FBC_BLIT_DST_HIDDEN 0x0400
+#define FBC_BLIT_DST_INTERSECT 0x0200
+#define FBC_BLIT_DST_VISIBLE 0x0100
 #define FBC_MODE_VBLANK     0x00080000  /* latched at each retrace, write 1 to clear */
 
 #define TYPE_CG6 "sun-cg6"
@@ -161,6 +175,12 @@ struct CG6State {
 
     qemu_irq irq;
     QEMUTimer *vsync_timer;
+    uint32_t draw_status;           /* FBC_DRAW: how the last primitive fared against the clip */
+    uint32_t blit_status;           /* FBC_BLIT: the same for the last blit */
+    uint32_t last_wr;               /* the FBC register written before this one */
+    bool pt_pending;                /* APOINTX seen without APOINTY: maybe a rectangle edge */
+    int pt_x0;
+    int last_ry0, last_ry1;         /* the Y span of the last rectangle */
     bool vblank;                    /* FBC_MODE_VBLANK: a retrace since it was cleared */
     bool intr;                      /* vertical retrace interrupt pending */
     bool line_chain;                /* the last vertex starts the next line */
@@ -248,6 +268,38 @@ static inline void cg6_pixel(CG6State *s, uint8_t *vram, int x, int y,
     *p = (d & ~pm) | (n & pm);
 }
 
+/* 0: entirely outside the clip rectangle, 1: partly, 2: entirely inside */
+static int cg6_clip_class(CG6State *s, int x0, int y0, int x1, int y1)
+{
+    int cx0 = (int32_t)s->fbc[FBC_CLIPMINX / 4], cy0 = (int32_t)s->fbc[FBC_CLIPMINY / 4];
+    int cx1 = (int32_t)s->fbc[FBC_CLIPMAXX / 4], cy1 = (int32_t)s->fbc[FBC_CLIPMAXY / 4];
+
+    if (x1 < cx0 || x0 > cx1 || y1 < cy0 || y0 > cy1) {
+        return 0;
+    }
+    return (x0 >= cx0 && y0 >= cy0 && x1 <= cx1 && y1 <= cy1) ? 2 : 1;
+}
+
+/*
+ * Only a primitive that lies entirely inside the clip rectangle is drawn by
+ * the hardware; one that crosses its edge is left to software, and the draw
+ * status register says which case it was. Returns whether to draw.
+ */
+static bool cg6_set_draw_status(CG6State *s, int x0, int y0, int x1, int y1)
+{
+    switch (cg6_clip_class(s, x0, y0, x1, y1)) {
+    case 0:
+        s->draw_status = FBC_DRAW_HARDWARE | FBC_DRAW_HIDDEN;
+        return false;
+    case 1:
+        s->draw_status = FBC_DRAW_SOFTWARE | FBC_DRAW_INTERSECT;
+        return false;
+    default:
+        s->draw_status = FBC_DRAW_HARDWARE | FBC_DRAW_VISIBLE;
+        return true;
+    }
+}
+
 static void cg6_do_rect(CG6State *s, int x0, int y0, int x1, int y1)
 {
     uint8_t *vram = memory_region_get_ram_ptr(&s->vram_mem);
@@ -266,19 +318,37 @@ static void cg6_do_rect(CG6State *s, int x0, int y0, int x1, int y1)
     if (y0 > y1) {
         t = y0; y0 = y1; y1 = t;
     }
+    trace_sun_cg6_rect(x0, y0, x1, y1, rop, s->fbc[FBC_FG / 4],
+                       s->fbc[FBC_MODE / 4],
+                       (s->fbc[FBC_OFFX / 4] << 16) | (s->fbc[FBC_OFFY / 4] & 0xffff),
+                       (s->fbc[FBC_CLIPMINX / 4] << 16) | (s->fbc[FBC_CLIPMINY / 4] & 0xffff),
+                       (s->fbc[FBC_CLIPMAXX / 4] << 16) | (s->fbc[FBC_CLIPMAXY / 4] & 0xffff));
+    if (rop & FBC_POLYG_NONOVERLAP) {
+        /* the far edges belong to the next shape */
+        x1--;
+        y1--;
+    }
+    if (!cg6_set_draw_status(s, x0, y0, x1, y1)) {
+        return;
+    }
     for (y = y0; y <= y1; y++) {
         for (x = x0; x <= x1; x++) {
             cg6_pixel(s, vram, x, y, 0, rop, pm);
         }
     }
     memory_region_set_dirty(&s->vram_mem, 0, memory_region_size(&s->vram_mem));
-    trace_sun_cg6_rect(x0, y0, x1, y1, rop, s->fbc[FBC_FG / 4],
-                       s->fbc[FBC_PM / 4], s->fbc[FBC_MODE / 4]);
 }
 
 static void cg6_do_point(CG6State *s, int x, int y)
 {
     uint8_t *vram = memory_region_get_ram_ptr(&s->vram_mem);
+
+    if (!cg6_set_draw_status(s, x + (int32_t)s->fbc[FBC_OFFX / 4],
+                             y + (int32_t)s->fbc[FBC_OFFY / 4],
+                             x + (int32_t)s->fbc[FBC_OFFX / 4],
+                             y + (int32_t)s->fbc[FBC_OFFY / 4])) {
+        return;
+    }
 
     cg6_pixel(s, vram, x + (int32_t)s->fbc[FBC_OFFX / 4],
               y + (int32_t)s->fbc[FBC_OFFY / 4], 0, s->fbc[FBC_ALU / 4],
@@ -298,6 +368,10 @@ static void cg6_do_line(CG6State *s, int x0, int y0, int x1, int y1)
     int sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
     int err = dx + dy;
 
+    if (!cg6_set_draw_status(s, MIN(x0, x1) + offx, MIN(y0, y1) + offy,
+                             MAX(x0, x1) + offx, MAX(y0, y1) + offy)) {
+        return;
+    }
     for (;;) {
         int e2;
 
@@ -333,6 +407,18 @@ static void cg6_do_blit(CG6State *s)
     trace_sun_cg6_blit(sx0, sy0, dx0, dy0, w, h, rop);
     if (w <= 0 || h <= 0 || w > 4096 || h > 4096) {
         return;
+    }
+    {
+        int sc = cg6_clip_class(s, sx0, sy0, sx1, sy1);
+        int dc = cg6_clip_class(s, dx0, dy0, dx0 + w - 1, dy0 + h - 1);
+
+        s->blit_status =
+            (sc == 2 ? FBC_BLIT_SRC_VISIBLE :
+             sc == 1 ? FBC_BLIT_SRC_INTERSECT : FBC_BLIT_SRC_HIDDEN) |
+            (dc == 2 ? FBC_BLIT_DST_VISIBLE :
+             dc == 1 ? FBC_BLIT_DST_INTERSECT : FBC_BLIT_DST_HIDDEN) |
+            ((sc == 2 && dc == 2) || dc == 0 ? FBC_BLIT_HARDWARE :
+             FBC_BLIT_SOFTWARE);
     }
     /* copy through a buffer so overlapping areas behave */
     src = g_malloc(w * h);
@@ -387,7 +473,10 @@ static void cg6_do_font(CG6State *s, uint32_t bits)
     /* the position advances by the increment registers */
     s->fbc[FBC_X0 / 4] += s->fbc[FBC_INCX / 4];
     s->fbc[FBC_Y0 / 4] += s->fbc[FBC_INCY / 4];
-    trace_sun_cg6_font(x0, y, n, bits);
+    trace_sun_cg6_font(x0, y, n, bits, rop, s->fbc[FBC_FG / 4], s->fbc[FBC_BG / 4],
+                       (s->fbc[FBC_OFFX / 4] << 16) | (s->fbc[FBC_OFFY / 4] & 0xffff),
+                       (s->fbc[FBC_CLIPMINX / 4] << 16) | (s->fbc[FBC_CLIPMINY / 4] & 0xffff),
+                       (s->fbc[FBC_CLIPMAXX / 4] << 16) | (s->fbc[FBC_CLIPMAXY / 4] & 0xffff));
 }
 
 static uint64_t cg6_fbc_read(void *opaque, hwaddr addr, unsigned size)
@@ -402,8 +491,9 @@ static uint64_t cg6_fbc_read(void *opaque, hwaddr addr, unsigned size)
             cg6_do_blit(s);
             s->blit_regs = 0;
         }
-        return 0;
+        return s->blit_status;
     case FBC_DRAW:
+        return s->draw_status;
     case FBC_S:
         return 0;               /* never busy */
     case FBC_MODE:
@@ -419,11 +509,18 @@ static void cg6_fbc_write(void *opaque, hwaddr addr, uint64_t val,
     CG6State *s = opaque;
     uint32_t v = val;
 
+    uint32_t prev = s->last_wr;
+
     addr &= 0xfff;
+    s->last_wr = addr;
     trace_sun_cg6_fbc_write(addr, v);
     if (addr < FBC_APOINTX || addr > FBC_RLINEY) {
         /* any other write ends a run of connected vertices */
         s->line_chain = false;
+    }
+    if (addr >= 0x880 && addr < 0x900) {
+        trace_sun_cg6_poly(addr, v, (int32_t)s->fbc[FBC_OFFX / 4],
+                           (int32_t)s->fbc[FBC_OFFY / 4]);
     }
     switch (addr) {
     case FBC_MODE:
@@ -457,6 +554,8 @@ static void cg6_fbc_write(void *opaque, hwaddr addr, uint64_t val,
             s->rect_y0 = s->cur_y = s->fbc[FBC_ARECTY / 4];
         } else {
             s->rect_pts = 0;
+            s->last_ry0 = s->rect_y0;
+            s->last_ry1 = s->fbc[FBC_ARECTY / 4];
             cg6_do_rect(s, s->rect_x0, s->rect_y0, v,
                         s->fbc[FBC_ARECTY / 4]);
             s->cur_x = v;
@@ -473,11 +572,31 @@ static void cg6_fbc_write(void *opaque, hwaddr addr, uint64_t val,
         s->rect_pts = 0;
         s->cur_x += (int32_t)v;
         s->cur_y += (int32_t)s->fbc[FBC_RRECTY / 4];
+        s->last_ry0 = s->rect_y0;
+        s->last_ry1 = s->cur_y;
         cg6_do_rect(s, s->rect_x0, s->rect_y0, s->cur_x, s->cur_y);
+        return;
+    case 0x880:
+        /*
+         * The second X of a rectangle edge: APOINTX and this one reuse the
+         * Y values of the last rectangle (X servers draw the right edge of a
+         * window border this way).
+         */
+        s->fbc[addr / 4] = v;
+        if (s->pt_pending) {
+            s->pt_pending = false;
+            cg6_do_rect(s, s->pt_x0, s->last_ry0, v, s->last_ry1);
+        }
         return;
     case FBC_APOINTX:
     case FBC_RPOINTX:
         s->fbc[addr / 4] = v;
+        s->pt_pending = false;
+        if (addr == FBC_APOINTX && prev != FBC_APOINTY) {
+            s->pt_pending = true;
+            s->pt_x0 = v;
+            return;
+        }
         if (addr == FBC_APOINTX) {
             s->cur_x = v;
             s->cur_y = s->fbc[FBC_APOINTY / 4];
