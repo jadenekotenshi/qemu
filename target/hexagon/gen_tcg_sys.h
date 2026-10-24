@@ -80,14 +80,18 @@
 #define fGEN_TCG_Y2_wait(SHORTCODE) \
     do { \
         RsV = RsV; \
-        gen_helper_wait(tcg_env); \
+        gen_helper_hexagon_wait(tcg_env); \
     } while (0)
 
 #define fGEN_TCG_Y2_resume(SHORTCODE) \
-    gen_helper_resume(tcg_env, RsV)
+    do { \
+        gen_helper_resume(tcg_env, RsV); \
+    } while (0)
 
 #define fGEN_TCG_Y2_start(SHORTCODE) \
-    gen_helper_start(tcg_env, RsV)
+    do { \
+        gen_helper_start(tcg_env, RsV); \
+    } while (0)
 
 #define fGEN_TCG_Y2_stop(SHORTCODE) \
     do { \

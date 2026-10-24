@@ -43,6 +43,14 @@ const char *target_cpu_type(void);
 bool target_big_endian(void);
 
 /**
+ * target_heterogeneous:
+ *
+ * Returns true if current binary has support for running several target
+ * architectures at once (heterogeneous emulation).
+ */
+bool target_heterogeneous(void);
+
+/**
  * target_base_arm:
  *
  * Returns whether the target architecture is ARM or Aarch64.
@@ -69,6 +77,13 @@ bool target_aarch64(void);
  * Returns whether the target architecture is M68K.
  */
 bool target_m68k(void);
+
+/**
+ * target_hexagon:
+ *
+ * Returns whether the target architecture is Hexagon.
+ */
+bool target_hexagon(void);
 
 /**
  * target_or1k:

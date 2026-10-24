@@ -42,6 +42,12 @@ bool target_big_endian(void)
     return target_endian_mode() == ENDIAN_MODE_BIG;
 }
 
+bool target_heterogeneous(void)
+{
+    /* For now, we only run a single target at a time */
+    return false;
+}
+
 bool target_base_arm(void)
 {
     switch (target_arch()) {
@@ -66,6 +72,11 @@ bool target_aarch64(void)
 bool target_m68k(void)
 {
     return target_arch() == SYS_EMU_TARGET_M68K;
+}
+
+bool target_hexagon(void)
+{
+    return target_arch() == SYS_EMU_TARGET_HEXAGON;
 }
 
 bool target_or1k(void)
