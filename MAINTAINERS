@@ -129,6 +129,7 @@ F: docs/system/s390x/
 F: tests/qtest/migration/s390x/
 K: ^Subject:.*(?i)s390x?
 T: git https://gitlab.com/cohuck/qemu.git s390-next
+T: git https://gitlab.com/efarman/qemu.git s390-next
 L: qemu-s390x@nongnu.org
 
 MIPS general architecture support
@@ -149,6 +150,7 @@ F: configs/targets/i386-softmmu.mak
 F: configs/targets/x86_64-softmmu.mak
 F: docs/system/i386/
 F: docs/system/target-i386*
+F: gdbstub/gdb-xml/i386-*.xml
 F: stubs/hmp-cmds-target-i386.c
 F: target/i386/*.[ch]
 F: target/i386/Kconfig
@@ -256,6 +258,8 @@ F: tests/qtest/l2vic-test.c
 F: hw/timer/qct-qtimer.c
 F: include/hw/timer/qct-qtimer.h
 F: tests/qtest/qct-qtimer-test.c
+F: hw/hexagon/hex-board.c
+F: include/hw/hexagon/hex-board.h
 X: target/hexagon/idef-parser/
 X: target/hexagon/gen_idef_parser_funcs.py
 F: linux-user/hexagon/
@@ -302,6 +306,8 @@ M: Laurent Vivier <laurent@vivier.eu>
 S: Maintained
 F: target/m68k/
 F: disas/m68k.c
+F: gdbstub/gdb-xml/cf*.xml
+F: gdbstub/gdb-xml/m68k*.xml
 F: tests/functional/m68k/meson.build
 F: tests/tcg/m68k/
 
@@ -369,6 +375,7 @@ F: configs/targets/riscv*
 F: docs/system/target-riscv.rst
 F: docs/specs/riscv-iommu.rst
 F: target/riscv/
+F: gdbstub/gdb-xml/riscv*.xml
 F: hw/char/riscv_htif.c
 F: hw/riscv/
 F: hw/intc/riscv*
@@ -946,6 +953,7 @@ F: include/hw/misc/imx7_*.h
 F: hw/pci-host/designware.c
 F: include/hw/pci-host/designware.h
 F: docs/system/arm/mcimx7d-sabre.rst
+F: tests/functional/arm/test_mcimx7d_sabre.py
 
 MCIMX8MM-EVK / iMX8MM
 M: Gaurav Sharma <gaurav.sharma_7@nxp.com>
@@ -1065,6 +1073,7 @@ F: include/hw/usb/imx-usb-phy.h
 F: include/hw/arm/fsl-imx6.h
 F: include/hw/misc/imx6_*.h
 F: include/hw/ssi/imx_spi.h
+F: tests/functional/arm/test_sabrelite.py
 
 SBSA-REF
 M: Peter Maydell <peter.maydell@linaro.org>
@@ -1075,6 +1084,7 @@ F: hw/arm/sbsa-ref.c
 F: hw/misc/sbsa_ec.c
 F: hw/watchdog/sbsa_gwdt.c
 F: include/hw/watchdog/sbsa_gwdt.h
+F: tests/qtest/sbsa-gwdt-test.c
 F: docs/system/arm/sbsa.rst
 F: tests/functional/aarch64/test_*sbsaref*.py
 
@@ -1378,10 +1388,14 @@ M: Brian Cain <brian.cain@oss.qualcomm.com>
 R: Pierrick Bouvier <pierrick.bouvier@oss.qualcomm.com>
 S: Supported
 F: hw/hexagon/
+F: hw/misc/qcom-qdsp6ss-clk.c
 F: include/hw/hexagon/
+F: include/hw/misc/qcom-qdsp6ss-clk.h
 F: configs/devices/hexagon-softmmu/default.mak
 F: docs/system/hexagon/
 F: tests/functional/hexagon/
+F: tests/qtest/hexagon-config-test.c
+F: tests/qtest/qcom-dsp-test.c
 F: docs/devel/hexagon-sys.rst
 
 LoongArch Machines
@@ -1986,7 +2000,7 @@ S390-ccw boot
 M: Jared Rossi <jrossi@linux.ibm.com>
 R: Zhuoying Cai <zycai@linux.ibm.com>
 R: Christian Borntraeger <borntraeger@linux.ibm.com>
-R: Jason Herne <jjherne@linux.ibm.com>
+R: Joshua Daley <jdaley@linux.ibm.com>
 S: Supported
 F: hw/s390x/ipl.*
 F: hw/s390x/cert-store.[ch]
@@ -2300,7 +2314,7 @@ F: docs/specs/*pci*
 F: docs/system/sriov.rst
 
 ARM PCI Hotplug
-M: Gustavo Romero <gustavo.romero@linaro.org>
+M: Gustavo Romero <gromero@redhat.com>
 L: qemu-arm@nongnu.org
 S: Supported
 F: tests/functional/aarch64/test_hotplug_pci.py
@@ -2532,18 +2546,26 @@ M: Michael S. Tsirkin <mst@redhat.com>
 R: Stefano Garzarella <sgarzare@redhat.com>
 S: Supported
 F: hw/*/*vhost*
-F: docs/interop/vhost-user*
 F: docs/system/devices/virtio/vhost-user*
 F: contrib/vhost-user-*/
 F: backends/*vhost*
 F: include/system/vhost-user-backend.h
 F: include/hw/virtio/vhost*
 F: include/*/vhost*
-F: subprojects/libvhost-user/
 F: block/export/vhost-user*
 F: util/vhost-user-server.c
 F: net/vhost*
 F: tests/functional/x86_64/test_vhost_user_bridge.py
+
+vhost-user protocol
+M: Michael S. Tsirkin <mst@redhat.com>
+R: Stefano Garzarella <sgarzare@redhat.com>
+L: vhost-user@lists.linux.dev
+S: Supported
+F: docs/interop/vhost-user*
+F: hw/virtio/vhost-user.c
+F: include/hw/virtio/vhost-user.h
+F: subprojects/libvhost-user/
 
 vhost-shadow-virtqueue
 R: Eugenio Pérez <eperezma@redhat.com>
@@ -3176,7 +3198,7 @@ F: include/hw/hyperv/dynmem-proto.h
 F: include/hw/hyperv/hv-balloon.h
 
 ivshmem-flat
-M: Gustavo Romero <gustavo.romero@linaro.org>
+M: Gustavo Romero <gromero@redhat.com>
 S: Maintained
 F: hw/misc/ivshmem-flat.c
 F: include/hw/misc/ivshmem-flat.h
@@ -3370,7 +3392,7 @@ F: docs/devel/migration/CPR.rst
 
 Compute Express Link
 M: Jonathan Cameron <jic23@kernel.org>
-R: Junjie Cao <junjie.cao@intel.com>
+R: Junjie Cao <junjie.cao@linux.dev>
 R: Anisa Su <anisa.su@samsung.com>
 L: linux-cxl@vger.kernel.org
 S: Supported

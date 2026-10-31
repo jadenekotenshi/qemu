@@ -18,6 +18,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/cutils.h"
 #include "qemu/qemu-print.h"
 #include "qemu/ctype.h"
 #include "qemu/log.h"
@@ -221,6 +222,7 @@ const RISCVIsaExtData isa_edata_arr[] = {
     ISA_EXT_DATA_ENTRY(zksh, PRIV_VERSION_1_12_0, ext_zksh),
     ISA_EXT_DATA_ENTRY(zkt, PRIV_VERSION_1_12_0, ext_zkt),
     ISA_EXT_DATA_ENTRY(ztso, PRIV_VERSION_1_12_0, ext_ztso),
+    ISA_EXPERIMENTAL_EXT_DATA_ENTRY(zvabd, PRIV_VERSION_1_13_0, ext_zvabd),
     ISA_EXT_DATA_ENTRY(zvbb, PRIV_VERSION_1_12_0, ext_zvbb),
     ISA_EXT_DATA_ENTRY(zvbc, PRIV_VERSION_1_12_0, ext_zvbc),
     ISA_EXT_DATA_ENTRY(zve32f, PRIV_VERSION_1_10_0, ext_zve32f),
@@ -398,6 +400,11 @@ static const char * const riscv_excp_names[] = {
     [RISCV_EXCP_SEMIHOST] = "semihost",
 };
 
+const char *riscv_excp_name(int excp)
+{
+    return STR_ARRAY_ELEM_OR_NULL(riscv_excp_names, excp) ?: "unknown";
+}
+
 static const char * const riscv_intr_names[] = {
     [IRQ_U_SOFT] = "u_software",
     [IRQ_S_SOFT] = "s_software",
@@ -417,17 +424,10 @@ static const char * const riscv_intr_names[] = {
 
 const char *riscv_cpu_get_trap_name(uint64_t cause, bool async)
 {
-    if (async) {
-        if ((cause < ARRAY_SIZE(riscv_intr_names)) && riscv_intr_names[cause]) {
-            return riscv_intr_names[cause];
-        }
-    } else {
-        if ((cause < ARRAY_SIZE(riscv_excp_names)) && riscv_excp_names[cause]) {
-            return riscv_excp_names[cause];
-        }
-    }
+    const char *name = async ? STR_ARRAY_ELEM_OR_NULL(riscv_intr_names, cause)
+                             : STR_ARRAY_ELEM_OR_NULL(riscv_excp_names, cause);
 
-    return "(unknown)";
+    return name ?: "unknown";
 }
 
 void riscv_cpu_set_misa_ext(CPURISCVState *env, uint32_t ext)
@@ -963,7 +963,7 @@ uint64_t riscv_cpu_get_mip(const CPURISCVState *env)
     return qatomic_read(&env->mip);
 }
 
-bool riscv_cpu_has_work(CPUState *cs)
+static bool riscv_cpu_has_work(CPUState *cs)
 {
     RISCVCPU *cpu = RISCV_CPU(cs);
     CPURISCVState *env = &cpu->env;
@@ -1549,6 +1549,25 @@ static void riscv_cpu_init(Object *obj)
 #endif
     cpu->env.vext_ver = VEXT_VERSION_1_00_0;
     cpu->cfg.max_satp_mode = -1;
+
+    /*
+     * The way we're handling profiles does not cope well with QMP
+     * instropection.  We have a static array that stores RISCVCPUProfiles
+     * objs that hold runtime state for the lifetime of the QEMU process.
+     * Thus setting profile->enabled once, e.g. when instropecting a
+     * profile CPU, will leave the flag set for subsequent intropections.
+     *
+     * For now, clear all 'enabled' flags to avoid misleading QMP w.r.t
+     * profiles being set.
+     *
+     * FIXME: a better long term solution is to remove profile->enabled
+     * and just use regular cpu->cfg flags, avoiding static variables
+     * storing dynamic state.  This will help us not only with QMP but
+     * also single-binary support.
+     */
+    for (int i = 0; riscv_profiles[i] != NULL; i++) {
+        riscv_profiles[i]->enabled = false;
+    }
 
     if (mcc->def->profile) {
         mcc->def->profile->enabled = true;
@@ -2298,7 +2317,7 @@ static void prop_marchid_set(Object *obj, Visitor *v, const char *name,
         g_assert_not_reached();
     }
 
-    invalid_val = 1LL << (mxlen - 1);
+    invalid_val = 1ULL << (mxlen - 1);
 
     if (value == invalid_val) {
         error_setg(errp, "Unable to set marchid with MSB (%u) bit set "
@@ -3130,6 +3149,7 @@ static void riscv_cpu_common_class_init(ObjectClass *c, const void *data)
                                        &mcc->parent_phases);
 
     cc->class_by_name = riscv_cpu_class_by_name;
+    cc->exception_name = riscv_excp_name;
     cc->dump_state = riscv_cpu_dump_state;
     cc->set_pc = riscv_cpu_set_pc;
     cc->get_pc = riscv_cpu_get_pc;

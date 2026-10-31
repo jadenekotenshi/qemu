@@ -163,6 +163,12 @@ else
   iasl = find_program(get_option('iasl'), required: true)
 endif
 
+if get_option('gdb') == ''
+  gdb = find_program(['gdb-multiarch', 'gdb'], required: false)
+else
+  gdb = find_program(get_option('gdb'), required: true)
+endif
+
 edk2_targets = [ 'arm-softmmu', 'aarch64-softmmu', 'i386-softmmu', 'x86_64-softmmu', 'riscv64-softmmu', 'loongarch64-softmmu' ]
 unpack_edk2_blobs = false
 foreach target : edk2_targets
@@ -2753,6 +2759,12 @@ config_host_data.set('HAVE_STRUCT_STAT_ST_ATIM',
 config_host_data.set('HAVE_BLK_ZONE_REP_CAPACITY',
                      cc.has_member('struct blk_zone', 'capacity',
                                    prefix: '#include <linux/blkzoned.h>'))
+config_host_data.set('HAVE_STRUCT_RT_METRICS_RMX_METRIC',
+                     cc.has_member('struct rt_metrics', 'rmx_metric',
+                                   prefix: '''
+                                       #include <sys/types.h>
+                                       #include <sys/socket.h>
+                                       #include <net/route.h>'''))
 
 # has_type
 config_host_data.set('CONFIG_IOVEC',
@@ -4161,6 +4173,7 @@ foreach target_base_arch, config_base_arch : config_base_arch_mak
   # prevent common code to access cpu compile time definition,
   # but still allow access to cpu.h
   target_c_args = ['-DCPU_DEFS_H']
+  target_c_args += ['-DTARGET_ARCH_PREFIX=target_' + target_base_arch.to_lower()]
   target_system_c_args = target_c_args + ['-DCOMPILING_SYSTEM_VS_USER', '-DCONFIG_SOFTMMU']
 
   if target_base_arch in target_common_arch
@@ -4268,11 +4281,29 @@ multi_target_supported_targets = [
   'avr-softmmu',
   'hexagon-softmmu',
   'hppa-softmmu',
+  # 'i386-softmmu',
+  # 'loongarch64-softmmu',
   'm68k-softmmu',
   'microblaze-softmmu',
+  # 'mips-softmmu',
+  # 'mips64-softmmu',
+  # 'mips64el-softmmu',
+  # 'mipsel-softmmu',
   'or1k-softmmu',
+  # 'ppc-softmmu',
+  # 'ppc64-softmmu',
+  # 'riscv32-softmmu',
+  'riscv64-softmmu',
   'rx-softmmu',
+  # 's390x-softmmu',
+  # 'sh4-softmmu',
+  # 'sh4eb-softmmu',
+  # 'sparc-softmmu',
+  # 'sparc64-softmmu',
   'tricore-softmmu',
+  # 'x86_64-softmmu',
+  # 'xtensa-softmmu',
+  # 'xtensaeb-softmmu',
 ]
 
 emulators = {}
@@ -4284,6 +4315,7 @@ foreach target : target_dirs
   arch_deps = []
   c_args = ['-DCOMPILING_PER_TARGET',
             '-DCONFIG_TARGET="@0@-config-target.h"'.format(target),
+            '-DTARGET_ARCH_PREFIX=target_' + target_base_arch.to_lower(),
   ]
   link_args = emulator_link_args
 
@@ -4710,14 +4742,7 @@ summary(summary_info, bool_yn: true, section: 'Directories')
 summary_info = {}
 summary_info += {'python':            '@0@ (version: @1@)'.format(python.full_path(), python.language_version())}
 summary_info += {'sphinx-build':      sphinx_build}
-
-# FIXME: the [binaries] section of machine files, which can be probed
-# with find_program(), would be great for passing gdb and genisoimage
-# paths from configure to Meson.  However, there seems to be no way to
-# hide a program (for example if gdb is too old).
-if config_host.has_key('GDB')
-  summary_info += {'gdb':             config_host['GDB']}
-endif
+summary_info += {'gdb':               gdb}
 summary_info += {'iasl':              iasl}
 summary_info += {'genisoimage':       config_host['GENISOIMAGE']}
 if host_os == 'windows' and have_ga

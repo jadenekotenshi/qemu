@@ -234,6 +234,19 @@ in the QEMU object model anymore. ``Sun-UltraSparc-IIIi+`` and
 but for consistency these will get removed in a future release, too.
 Use ``Sun-UltraSparc-IIIi-plus`` and ``Sun-UltraSparc-IV-plus`` instead.
 
+``cortex-a53`` and ``cortex-a57`` CPU names with KVM on Arm (since 11.2)
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+QEMU currently allows the CPU name to be set to ``cortex-a53`` or
+``cortex-a57`` when using KVM; this is identical to using ``host`` or
+``max``, but it will only work when the host CPU is a Cortex-A53 or
+Cortex-A57.  These CPUs are now over 10 years old, and the ability to
+use the named CPU type like this is part of a legacy corner of the KVM
+API, which doesn't work with any other host CPU types. Using these CPU
+names with KVM enabled is deprecated; use ``host`` or ``max`` instead,
+which will have identical behaviour on the hosts where using
+``cortex-a53`` or ``cortex-a57`` works.
+
 System emulator machines
 ------------------------
 
@@ -349,29 +362,18 @@ the addition of volatile memory support, it is now necessary to distinguish
 between persistent and volatile memory backends.  As such, memdev is deprecated
 in favor of persistent-memdev.
 
+``-device virtio-blk,serial=more_than_20_characters`` (since 11.2)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-RISC-V CPU properties which start with capital 'Z' (since 8.2)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+The ``virtio-blk`` device has a limitation of 20 characters for the serial
+string. Accidentally, QEMU started accepting longer strings on the command line
+in version 0.15.0, but it was still silently truncated to 20 characters for
+guests.
 
-All RISC-V CPU properties which start with capital 'Z' are being deprecated
-starting in 8.2. The reason is that they were wrongly added with capital 'Z'
-in the past. CPU properties were later added with lower-case names, which
-is the format we want to use from now on.
-
-Users which try to use these deprecated properties will receive a warning
-recommending to switch to their stable counterparts:
-
-- "Zifencei" should be replaced with "zifencei"
-- "Zicsr" should be replaced with "zicsr"
-- "Zihintntl" should be replaced with "zihintntl"
-- "Zihintpause" should be replaced with "zihintpause"
-- "Zawrs" should be replaced with "zawrs"
-- "Zfa" should be replaced with "zfa"
-- "Zfh" should be replaced with "zfh"
-- "Zfhmin" should be replaced with "zfhmin"
-- "Zve32f" should be replaced with "zve32f"
-- "Zve64f" should be replaced with "zve64f"
-- "Zve64d" should be replaced with "zve64d"
+Specifying a longer serial than can be exposed to the guest is a configuration
+error and deprecated; it will become a hard error in later versions. If the
+truncation is intentional, explicitly specify the serial already in truncated
+form on the command line instead.
 
 Block device options
 ''''''''''''''''''''

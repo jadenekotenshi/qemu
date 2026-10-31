@@ -25,6 +25,18 @@ tests += {
   'test-minstret-ecall.S': setup + {'qemu_args': ['-icount', 'shift=1', qemu_args]},
   'test-minstret-wfi.S': setup + {'qemu_args': ['-icount', 'shift=1', qemu_args]},
   'test-misa-w.S': setup + {'qemu_args': ['-cpu', 'rv64,x-misa-w=true,c=true,v=true', qemu_args]},
+  'test-zvabd.S': setup + {'qemu_args': ['-cpu', 'rv64,v=true,vlen=256,x-zvabd=true', qemu_args]},
+  'test-vsepc-masking.S': setup + {
+    'test_name': 'test-vsepc-masking-c',
+    'qemu_args': ['-cpu', 'rv64,h=true,c=true', qemu_args],
+  },
+}
+
+tests += {
+  'test-vsepc-masking.S': {
+    'test_name': 'test-vsepc-masking-no-c',
+    'qemu_args': ['-cpu', 'rv64,h=true,c=false,zca=false', qemu_args],
+  },
 }
 
 tests += {
@@ -80,9 +92,9 @@ tests += {
 if 'qemu-system-riscv64' in emulators
   tcg_tests += {
     'riscv64-softmmu': {
-      'cc': cc,
-      'cc_alt': cc_alt + ['riscv64-elf-gcc'],
-      'cc_dockerfile': cc_dockerfile,
+      'cc': 'riscv64-linux-gnu-gcc',
+      'cc_alt': ['riscv64-redhat-linux-gnu-gcc', 'riscv64-elf-gcc'],
+      'cc_dockerfile': 'debian-all-test-cross',
       'folder': 'riscv64',
       'gdb_arch': 'riscv64',
       'qemu': emulators['qemu-system-riscv64'],

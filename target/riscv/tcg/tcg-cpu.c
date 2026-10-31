@@ -306,7 +306,6 @@ const TCGCPUOps riscv_tcg_ops = {
     .pointer_wrap = riscv_pointer_wrap,
     .cpu_exec_enter = riscv_cpu_exec_enter,
     .cpu_exec_interrupt = riscv_cpu_exec_interrupt,
-    .cpu_exec_halt = riscv_cpu_has_work,
     .cpu_exec_reset = cpu_reset,
     .do_interrupt = riscv_cpu_do_interrupt,
     .do_transaction_failed = riscv_cpu_do_transaction_failed,
@@ -758,6 +757,12 @@ void riscv_cpu_validate_set_extensions(RISCVCPU *cpu, Error **errp)
         error_setg(
             errp,
             "Zvbc and Zvknhb extensions require V or Zve64x extensions");
+        return;
+    }
+
+    if ((cpu->cfg.ext_zvabd) && !cpu->cfg.ext_zve32x) {
+        error_setg(errp,
+                   "Zvabd extensions require V or Zve* extensions");
         return;
     }
 
@@ -1749,6 +1754,7 @@ static const TypeInfo riscv_tcg_cpu_accel_type_info = {
 
     .parent = TYPE_ACCEL_CPU,
     .class_init = riscv_tcg_cpu_accel_class_init,
+    .is_available = target_base_riscv,
     .abstract = true,
 };
 

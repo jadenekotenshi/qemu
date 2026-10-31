@@ -597,7 +597,7 @@ static void mxcc_stream_error(CPUSPARCState *env, hwaddr addr)
     env->mxccregs[6] = err;
 }
 
-uint64_t helper_ld_asi(CPUSPARCState *env, target_ulong addr,
+uint64_t HELPER(ld_asi)(CPUSPARCState *env, target_ulong addr,
                        int asi, uint32_t memop)
 {
     int size = 1 << (memop & MO_SIZE);
@@ -857,7 +857,7 @@ uint64_t helper_ld_asi(CPUSPARCState *env, target_ulong addr,
     return ret;
 }
 
-void helper_st_asi(CPUSPARCState *env, target_ulong addr, uint64_t val,
+void HELPER(st_asi)(CPUSPARCState *env, target_ulong addr, uint64_t val,
                    int asi, uint32_t memop)
 {
     int size = 1 << (memop & MO_SIZE);
@@ -1203,7 +1203,7 @@ void helper_st_asi(CPUSPARCState *env, target_ulong addr, uint64_t val,
 #endif
 }
 
-uint64_t helper_ld_code(CPUSPARCState *env, target_ulong addr, uint32_t oi)
+uint64_t HELPER(ld_code)(CPUSPARCState *env, target_ulong addr, uint32_t oi)
 {
     MemOp mop = get_memop(oi);
     uintptr_t ra = GETPC();
@@ -1241,7 +1241,7 @@ uint64_t helper_ld_code(CPUSPARCState *env, target_ulong addr, uint32_t oi)
 #else /* TARGET_SPARC64 */
 
 #ifdef CONFIG_USER_ONLY
-uint64_t helper_ld_asi(CPUSPARCState *env, target_ulong addr,
+uint64_t HELPER(ld_asi)(CPUSPARCState *env, target_ulong addr,
                        int asi, uint32_t memop)
 {
     int size = 1 << (memop & MO_SIZE);
@@ -1330,7 +1330,7 @@ uint64_t helper_ld_asi(CPUSPARCState *env, target_ulong addr,
     return ret;
 }
 
-void helper_st_asi(CPUSPARCState *env, target_ulong addr, target_ulong val,
+void HELPER(st_asi)(CPUSPARCState *env, target_ulong addr, target_ulong val,
                    int asi, uint32_t memop)
 {
     int size = 1 << (memop & MO_SIZE);
@@ -1361,7 +1361,7 @@ void helper_st_asi(CPUSPARCState *env, target_ulong addr, target_ulong val,
 
 #else /* CONFIG_USER_ONLY */
 
-uint64_t helper_ld_asi(CPUSPARCState *env, target_ulong addr,
+uint64_t HELPER(ld_asi)(CPUSPARCState *env, target_ulong addr,
                        int asi, uint32_t memop)
 {
     int size = 1 << (memop & MO_SIZE);
@@ -1660,7 +1660,7 @@ uint64_t helper_ld_asi(CPUSPARCState *env, target_ulong addr,
     return ret;
 }
 
-void helper_st_asi(CPUSPARCState *env, target_ulong addr, target_ulong val,
+void HELPER(st_asi)(CPUSPARCState *env, target_ulong addr, target_ulong val,
                    int asi, uint32_t memop)
 {
     int size = 1 << (memop & MO_SIZE);
