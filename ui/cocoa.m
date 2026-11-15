@@ -44,7 +44,7 @@
 #include "qapi/qapi-commands-machine.h"
 #include "qapi/qapi-commands-misc.h"
 #include "system/blockdev.h"
-#include "qemu-version.h"
+#include "qemu/version.h"
 #include "qemu/cutils.h"
 #include "qemu/main-loop.h"
 #include "qemu/module.h"
@@ -1858,6 +1858,9 @@ static void cocoa_clipboard_notify(Notifier *notifier, void *data)
         cocoa_clipboard_update_info(notify->info);
         return;
     case QEMU_CLIPBOARD_RESET_SERIAL:
+        /* ignore */
+        return;
+    case QEMU_CLIPBOARD_PEER_UPDATE:
         /* ignore */
         return;
     }

@@ -36,13 +36,6 @@ const KVMCapabilityInfo kvm_arch_required_capabilities[] = {
     KVM_CAP_LAST_INFO
 };
 
-static bool kvm_cpu_has_msgint(CPUState *cs)
-{
-    LoongArchCPU *cpu = LOONGARCH_CPU(cs);
-
-    return FIELD_EX64(cpu->env.cpucfg[1], CPUCFG1, MSG_INT);
-}
-
 static int kvm_get_stealtime(CPUState *cs)
 {
     CPULoongArchState *env = cpu_env(cs);
@@ -374,7 +367,7 @@ static int kvm_loongarch_get_csr(CPUState *cs)
      * Since register CSR_ESTAT will sync software pending MSGINT status to
      * hardware register and modify HW CSR MSGIS registers.
      */
-    if (kvm_cpu_has_msgint(cs)) {
+    if (cpu_has_msgint(env)) {
         ret |= kvm_get_one_reg(cs, KVM_IOC_CSRID(LOONGARCH_CSR_MSGIS(0)),
                                &sys->CSR_MSGIS[0]);
 
@@ -564,7 +557,7 @@ static int kvm_loongarch_put_csr(CPUState *cs, KvmPutState level)
 
     ret |= kvm_loongarch_put_pmu(cs);
 
-    if (kvm_cpu_has_msgint(cs)) {
+    if (cpu_has_msgint(env)) {
         ret |= kvm_set_one_reg(cs, KVM_IOC_CSRID(LOONGARCH_CSR_MSGIS(0)),
                                &sys->CSR_MSGIS[0]);
 
@@ -1320,11 +1313,10 @@ int kvm_arch_pre_create_vcpu(CPUState *cpu, Error **errp)
     return 0;
 }
 
-int kvm_arch_init_vcpu(CPUState *cs)
+int kvm_arch_init_vcpu(CPUState *cs, Error **errp)
 {
     uint64_t val;
     int ret;
-    Error *local_err = NULL;
     LoongArchCPU *cpu = LOONGARCH_CPU(cs);
 
     cpu->vmsentry = qemu_add_vm_change_state_handler(
@@ -1334,51 +1326,43 @@ int kvm_arch_init_vcpu(CPUState *cs)
         brk_insn = val;
     }
 
-    ret = kvm_cpu_check_lsx(cs, &local_err);
+    ret = kvm_cpu_check_lsx(cs, errp);
     if (ret < 0) {
-        error_report_err(local_err);
         return ret;
     }
 
-    ret = kvm_cpu_check_lasx(cs, &local_err);
+    ret = kvm_cpu_check_lasx(cs, errp);
     if (ret < 0) {
-        error_report_err(local_err);
         return ret;
     }
 
-    ret = kvm_cpu_check_lbt(cs, &local_err);
+    ret = kvm_cpu_check_lbt(cs, errp);
     if (ret < 0) {
-        error_report_err(local_err);
         return ret;
     }
 
-    ret = kvm_cpu_check_pmu(cs, &local_err);
+    ret = kvm_cpu_check_pmu(cs, errp);
     if (ret < 0) {
-        error_report_err(local_err);
         return ret;
     }
 
-    ret = kvm_cpu_check_pv_features(cs, &local_err);
+    ret = kvm_cpu_check_pv_features(cs, errp);
     if (ret < 0) {
-        error_report_err(local_err);
         return ret;
     }
 
-    ret = kvm_cpu_check_ptw(cs, &local_err);
+    ret = kvm_cpu_check_ptw(cs, errp);
     if (ret < 0) {
-        error_report_err(local_err);
         return ret;
     }
 
-    ret = kvm_cpu_check_msgint(cs, &local_err);
+    ret = kvm_cpu_check_msgint(cs, errp);
     if (ret < 0) {
-        error_report_err(local_err);
         return ret;
     }
 
-    ret = kvm_cpu_check_misc_v1_1(cs, &local_err);
+    ret = kvm_cpu_check_misc_v1_1(cs, errp);
     if (ret < 0) {
-        error_report_err(local_err);
         return ret;
     }
 

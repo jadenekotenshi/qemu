@@ -14,6 +14,8 @@
 
 #include "qemu/osdep.h"
 #include "qapi/qapi-events-run-state.h"
+#include "qapi/qapi-type-infos-common.h"
+#include "qapi/qapi-type-infos-run-state.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include <math.h>
@@ -2218,7 +2220,7 @@ static void kvm_init_pmu_info(struct kvm_cpuid2 *cpuid, X86CPU *cpu)
     }
 }
 
-int kvm_arch_init_vcpu(CPUState *cs)
+int kvm_arch_init_vcpu(CPUState *cs, Error **errp)
 {
     struct {
         struct kvm_cpuid2 cpuid;
@@ -2240,12 +2242,12 @@ int kvm_arch_init_vcpu(CPUState *cs)
     int kvm_base = KVM_CPUID_SIGNATURE;
     int max_nested_state_len;
     int r;
-    Error *local_err = NULL;
 
     if (current_machine->cgs) {
         r = x86_confidential_guest_check_features(
                 X86_CONFIDENTIAL_GUEST(current_machine->cgs), cs);
         if (r < 0) {
+            error_setg(errp, "failed x86_confidential_guest_check_features (%d)", r);
             return r;
         }
     }
@@ -2258,6 +2260,7 @@ int kvm_arch_init_vcpu(CPUState *cs)
 
     r = kvm_arch_set_tsc_khz(cs);
     if (r < 0) {
+        error_setg(errp, "failed setting tsc_khz (%d)", r);
         return r;
     }
 
@@ -2285,14 +2288,14 @@ int kvm_arch_init_vcpu(CPUState *cs)
      * can still proceed and check/expand Hyper-V enlightenments here so legacy
      * behavior is preserved.
      */
-    if (!kvm_hyperv_expand_features(cpu, &local_err)) {
-        error_report_err(local_err);
+    if (!kvm_hyperv_expand_features(cpu, errp)) {
         return -ENOSYS;
     }
 
     if (hyperv_enabled(cpu)) {
         r = hyperv_init_vcpu(cpu);
         if (r) {
+            error_setg_errno(errp, -r, "failed hyperv_init_vcpu");
             return r;
         }
 
@@ -2371,6 +2374,7 @@ int kvm_arch_init_vcpu(CPUState *cs)
 
         r = kvm_xen_init_vcpu(cs);
         if (r) {
+            error_setg_errno(errp, -r, "failed kvm_xen_init_vcpu");
             return r;
         }
 
@@ -2419,12 +2423,12 @@ int kvm_arch_init_vcpu(CPUState *cs)
 
         ret = kvm_get_mce_cap_supported(cs->kvm_state, &mcg_cap, &banks);
         if (ret < 0) {
-            fprintf(stderr, "kvm_get_mce_cap_supported: %s", strerror(-ret));
+            error_setg_errno(errp, -ret, "failed kvm_get_mce_cap_supported");
             return ret;
         }
 
         if (banks < (env->mcg_cap & MCG_CAP_BANKS_MASK)) {
-            error_report("kvm: Unsupported MCE bank count (QEMU = %d, KVM = %d)",
+            error_setg(errp, "kvm: Unsupported MCE bank count (QEMU = %d, KVM = %d)",
                          (int)(env->mcg_cap & MCG_CAP_BANKS_MASK), banks);
             return -ENOTSUP;
         }
@@ -2432,7 +2436,7 @@ int kvm_arch_init_vcpu(CPUState *cs)
         unsupported_caps = env->mcg_cap & ~(mcg_cap | MCG_CAP_BANKS_MASK);
         if (unsupported_caps) {
             if (unsupported_caps & MCG_LMCE_P) {
-                error_report("kvm: LMCE not supported");
+                error_setg(errp, "kvm: LMCE not supported");
                 return -ENOTSUP;
             }
             warn_report("Unsupported MCG_CAP bits: 0x%" PRIx64,
@@ -2442,7 +2446,7 @@ int kvm_arch_init_vcpu(CPUState *cs)
         env->mcg_cap &= mcg_cap | MCG_CAP_BANKS_MASK;
         ret = kvm_vcpu_ioctl(cs, KVM_X86_SETUP_MCE, &env->mcg_cap);
         if (ret < 0) {
-            fprintf(stderr, "KVM_X86_SETUP_MCE: %s", strerror(-ret));
+            error_setg_errno(errp, -ret, "failed KVM_X86_SETUP_MCE");
             return ret;
         }
     }
@@ -2470,9 +2474,8 @@ int kvm_arch_init_vcpu(CPUState *cs)
             error_setg(&invtsc_mig_blocker,
                        "State blocked by non-migratable CPU device"
                        " (invtsc flag)");
-            r = migrate_add_blocker(&invtsc_mig_blocker, &local_err);
+            r = migrate_add_blocker(&invtsc_mig_blocker, errp);
             if (r < 0) {
-                error_report_err(local_err);
                 return r;
             }
         }
@@ -2501,6 +2504,7 @@ int kvm_arch_init_vcpu(CPUState *cs)
     cpuid_data.cpuid.padding = 0;
     r = kvm_vcpu_ioctl(cs, KVM_SET_CPUID2, &cpuid_data);
     if (r) {
+        error_setg_errno(errp, -r, "failed KVM_SET_CPUID2");
         goto fail;
     }
     kvm_init_xsave(env);
@@ -7099,13 +7103,13 @@ static void kvm_arch_set_honor_guest_pat(Object *obj, int value, Error **errp)
 void kvm_arch_accel_class_init(ObjectClass *oc)
 {
     object_class_property_add_enum(oc, "notify-vmexit", "NotifyVMexitOption",
-                                   &NotifyVmexitOption_lookup,
+                                   &NotifyVmexitOption_type_info,
                                    kvm_arch_get_notify_vmexit,
                                    kvm_arch_set_notify_vmexit);
     object_class_property_set_description(oc, "notify-vmexit",
                                           "Enable notify VM exit");
 
-    object_class_property_add(oc, "notify-window", "uint32",
+    object_class_property_add(oc, "notify-window", "uint32", &uint32_type_info,
                               kvm_arch_get_notify_window,
                               kvm_arch_set_notify_window,
                               NULL, NULL);
@@ -7113,7 +7117,7 @@ void kvm_arch_accel_class_init(ObjectClass *oc)
                                           "Clock cycles without an event window "
                                           "after which a notification VM exit occurs");
 
-    object_class_property_add(oc, "xen-version", "uint32",
+    object_class_property_add(oc, "xen-version", "uint32", &uint32_type_info,
                               kvm_arch_get_xen_version,
                               kvm_arch_set_xen_version,
                               NULL, NULL);
@@ -7123,6 +7127,7 @@ void kvm_arch_accel_class_init(ObjectClass *oc)
                                           "e.g. 0x4000a for 4.10)");
 
     object_class_property_add(oc, "xen-gnttab-max-frames", "uint16",
+                              &uint16_type_info,
                               kvm_arch_get_xen_gnttab_max_frames,
                               kvm_arch_set_xen_gnttab_max_frames,
                               NULL, NULL);
@@ -7130,6 +7135,7 @@ void kvm_arch_accel_class_init(ObjectClass *oc)
                                           "Maximum number of grant table frames");
 
     object_class_property_add(oc, "xen-evtchn-max-pirq", "uint16",
+                              &uint16_type_info,
                               kvm_arch_get_xen_evtchn_max_pirq,
                               kvm_arch_set_xen_evtchn_max_pirq,
                               NULL, NULL);
@@ -7137,7 +7143,7 @@ void kvm_arch_accel_class_init(ObjectClass *oc)
                                           "Maximum number of Xen PIRQs");
 
     object_class_property_add_enum(oc, "honor-guest-pat", "OnOffAuto",
-                                   &OnOffAuto_lookup,
+                                   &OnOffAuto_type_info,
                                    kvm_arch_get_honor_guest_pat,
                                    kvm_arch_set_honor_guest_pat);
     object_class_property_set_description(oc, "honor-guest-pat",

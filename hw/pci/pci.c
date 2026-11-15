@@ -53,6 +53,7 @@
 #include "qapi/error.h"
 #include "qemu/cutils.h"
 #include "pci-internal.h"
+#include "qapi/qapi-builtin-type-infos.h"
 
 #include "hw/xen/xen.h"
 #include "hw/i386/kvm/xen_evtchn.h"
@@ -81,6 +82,7 @@ static void prop_pci_busnr_get(Object *obj, Visitor *v, const char *name,
 
 static const PropertyInfo prop_pci_busnr = {
     .type = "busnr",
+    .qapi_type = &uint8_type_info,
     .get = prop_pci_busnr_get,
 };
 
@@ -2327,10 +2329,8 @@ static void pci_qdev_realize(DeviceState *qdev, Error **errp)
         pci_dev->cap_present |= QEMU_PCIE_CAP_CXL;
     }
 
-    pci_dev = do_pci_register_device(pci_dev,
-                                     object_get_typename(OBJECT(qdev)),
-                                     pci_dev->devfn, errp);
-    if (pci_dev == NULL) {
+    if (!do_pci_register_device(pci_dev, object_get_typename(OBJECT(qdev)),
+                                pci_dev->devfn, errp)) {
         pci_unregister_acpi_index(pci_dev);
         return;
     }
@@ -2347,6 +2347,11 @@ static void pci_qdev_realize(DeviceState *qdev, Error **errp)
             do_pci_unregister_device(pci_dev);
             return;
         }
+    }
+
+    if (!pcie_sriov_check_after_realize(pci_dev, errp)) {
+        pci_qdev_unrealize(DEVICE(pci_dev));
+        return;
     }
 
     /*

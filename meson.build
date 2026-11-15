@@ -78,6 +78,7 @@ have_user = have_linux_user or have_bsd_user
 ############
 
 sh = find_program('sh')
+git = find_program('git', required: false)
 python = import('python').find_installation()
 
 cc = meson.get_compiler('c')
@@ -3040,6 +3041,14 @@ config_host_data.set('CONFIG_ELF_AUX_INFO', cc.links(osdep_prefix + '''
     return hwcap;
   }'''))
 
+config_host_data.set('CONFIG_GETEXECPATH', cc.links(osdep_prefix + '''
+  #include <limits.h>
+  #include <unistd.h>
+  int main(void) {
+    char buf[PATH_MAX];
+    getexecpath(buf, sizeof(buf));
+  }'''))
+
 config_host_data.set('CONFIG_USBFS', have_linux_user and cc.compiles('''
   #include <linux/usbdevice_fs.h>
 
@@ -3522,6 +3531,7 @@ qapi_gen_depends = [ meson.current_source_dir() / 'scripts/qapi/__init__.py',
                      meson.current_source_dir() / 'scripts/qapi/parser.py',
                      meson.current_source_dir() / 'scripts/qapi/schema.py',
                      meson.current_source_dir() / 'scripts/qapi/source.py',
+                     meson.current_source_dir() / 'scripts/qapi/type_infos.py',
                      meson.current_source_dir() / 'scripts/qapi/types.py',
                      meson.current_source_dir() / 'scripts/qapi/visit.py',
                      meson.current_source_dir() / 'scripts/qapi-gen.py'
@@ -3551,15 +3561,25 @@ tracetool_depends = files(
   'scripts/tracetool/__init__.py',
 )
 
-qemu_version_cmd = [find_program('scripts/qemu-version.sh'),
-                    meson.current_source_dir(),
-                    get_option('pkgversion'), meson.project_version()]
-qemu_version = custom_target('qemu-version.h',
-                             output: 'qemu-version.h',
-                             command: qemu_version_cmd,
-                             capture: true,
-                             build_by_default: true,
-                             build_always_stale: true)
+qemu_pkgversion = get_option('pkgversion')
+git_describe_version = [git, 'describe', '--match', 'v*', '--dirty']
+if qemu_pkgversion == '' and git.found() and fs.exists('.git') and \
+    run_command(git_describe_version, check: false).returncode() == 0
+  # Refresh the version at build time, so that "make" after a commit updates it.
+  qemu_version = vcs_tag(input: 'scripts/qemu-version.h.in',
+                         output: 'qemu-version.h',
+                         command: git_describe_version,
+                         fallback: '')
+else
+  # Unlike vcs_tag(), which always defines QEMU_PKGVERSION, leave it out if
+  # empty.  include/qemu/version.h then omits the parentheses from
+  # QEMU_FULL_VERSION.
+  qemu_version_data = configuration_data()
+  if qemu_pkgversion != ''
+    qemu_version_data.set_quoted('QEMU_PKGVERSION', qemu_pkgversion)
+  endif
+  qemu_version = configure_file(output: 'qemu-version.h', configuration: qemu_version_data)
+endif
 genh += qemu_version
 
 hxdep = []

@@ -37,7 +37,7 @@
 #include "qobject/qdict.h"
 #include "qobject/qstring.h"
 #include "qobject/qjson.h"
-#include "qemu-version.h"
+#include "qemu/version.h"
 #include "qemu/cutils.h"
 #include "qemu/help_option.h"
 #include "qemu/hw-version.h"
@@ -2985,7 +2985,10 @@ void qemu_init(int argc, char **argv)
                           HD_OPTS);
                 break;
             case QEMU_OPTION_blockdev:
-                {
+                if (is_help_option(optarg)) {
+                    bdrv_show_help();
+                    exit(EXIT_SUCCESS);
+                } else {
                     Visitor *v;
                     BlockdevOptionsQueueEntry *bdo;
 
@@ -2998,8 +3001,8 @@ void qemu_init(int argc, char **argv)
                     visit_free(v);
                     loc_save(&bdo->loc);
                     QSIMPLEQ_INSERT_TAIL(&bdo_queue, bdo, entry);
-                    break;
                 }
+                break;
             case QEMU_OPTION_drive:
                 if (!qemu_opts_parse_noisily(qemu_find_opts("drive"),
                                              optarg, false)) {

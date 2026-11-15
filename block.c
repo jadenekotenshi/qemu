@@ -524,6 +524,21 @@ bool bdrv_uses_whitelist(void)
     return use_bdrv_whitelist;
 }
 
+static void bdrv_help_format_print(void *opaque, const char *name)
+{
+    if (bdrv_format_is_whitelisted(name, false)) {
+        printf("%s\n", name);
+    } else {
+        printf("%s (read-only)\n", name);
+    }
+}
+
+void bdrv_show_help(void)
+{
+      printf("Available blockdev drivers:\n");
+      bdrv_iterate_format(bdrv_help_format_print, NULL, true);
+}
+
 typedef struct CreateCo {
     BlockDriver *drv;
     char *filename;
@@ -5547,8 +5562,11 @@ int bdrv_replace_child_bs(BdrvChild *child, BlockDriverState *new_bs,
     Transaction *tran = tran_new();
     g_autoptr(GSList) refresh_list = NULL;
     BlockDriverState *old_bs = child->bs;
+    int64_t old_len;
 
     GLOBAL_STATE_CODE();
+
+    old_len = bdrv_getlength(old_bs);
 
     bdrv_ref(old_bs);
     bdrv_drained_begin(old_bs);
@@ -5565,6 +5583,16 @@ int bdrv_replace_child_bs(BdrvChild *child, BlockDriverState *new_bs,
     tran_finalize(tran, ret);
 
     bdrv_graph_wrunlock();
+
+    /* A parent caching the child size has to learn that it changed */
+    if (ret == 0) {
+        int64_t new_len = bdrv_getlength(new_bs);
+
+        if (new_len >= 0 && new_len != old_len) {
+            bdrv_parent_cb_resize(new_bs);
+        }
+    }
+
     bdrv_drained_end(old_bs);
     bdrv_drained_end(new_bs);
     bdrv_unref(old_bs);
